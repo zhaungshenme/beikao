@@ -1,0 +1,82 @@
+.DS_Store
+.history
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+**/*.log
+
+tests/**/coverage/
+tests/e2e/reports
+selenium-debug.log
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.local
+
+# Standalone exports have no parent repository ignore rules.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# npm is the documented package manager; commit package-lock.json for npm ci.
+yarn.lock
+pnpm-lock.yaml
+
+# 编译生成的文件
+auto-imports.d.ts
+components.d.ts
+
+# Personal learning records, optional model credentials and local build output
+study/storage/
+study-dist/
+
+# Release only the study application. Local browser
+# captures, handoffs, acceptance snapshots and offline drafts stay on this machine.
+study/*
+!study/server/
+!study/client-tests/
+!study/bridge/
+!study/index.html
+!study/main.ts
+!study/tsconfig.json
+!study/build.mjs
+!study/serve.mjs
+!study/runtime-config.mjs
+!study/service-process.ps1
+!study/desktop-launcher.ps1
+!study/verify.mjs
+!study/import-bank.mjs
+!study/data/
+study/data/*
+!study/data/README.md
+!study/README.md
+
+# Defense in depth for alternate local data/test directories.
+**/learning-state.json
+**/preanalysis-state.json
+**/bridge-jobs.json
+**/ai-settings.json
+**/official-ai-settings.json
+**/service.json
+**/writer.lock
+**/writer-recovery.lock
+**/*.pid
+**/*.tmp
+tmp/
+local-data/
+artifacts/
+**/questions.json
+**/questions*.backup-*.json
+
+# Rebuild the store upload package from browser-extension sources.
+browser-extension/dist/
+browser-extension/artifacts/

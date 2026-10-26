@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "allowJs": false,
+    "noEmit": true,
+    "tsBuildInfoFile": "../node_modules/.tmp/study.tsbuildinfo"
+  },
+  "include": [
+    "main.ts",
+    "../src/views/study/**/*.vue",
+    "../src/api/study/**/*.ts",
+    "../src/store/modules/study.ts"
+  ],
+  "exclude": ["../node_modules", "../study-dist"]
+}
