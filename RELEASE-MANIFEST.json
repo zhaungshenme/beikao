@@ -101,8 +101,8 @@
     },
     {
       "path": "src/views/study/StudyWorkspace.vue",
-      "bytes": 128951,
-      "sha256": "849659d215b11923de0fbb1032a6dc5fa6618f6098336737493a1f8e84b9502a"
+      "bytes": 129155,
+      "sha256": "df94924f64a835ec262679fc4287d2baa887aa68a602a0c393b0d3b67767a545"
     },
     {
       "path": "src/views/study/components/PreanalysisManager.vue",
