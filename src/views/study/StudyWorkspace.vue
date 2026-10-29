@@ -6,7 +6,7 @@ import StudyManagement from './StudyManagement.vue';
 import PreparedExplanation from './components/PreparedExplanation.vue';
 import { studyGradingResult } from '@/utils/studyGrading';
 import * as api from '@/api/study';
-import type { AiExplanation, StudyMode, StudyQuestion, StudySession } from '@/api/study/types';
+import type { AiHistoryEntry, AiSource, RetrievalArchiveEntry, RetrievalSource, StudyMode, StudyQuestion, StudySession } from '@/api/study/types';
 
 type Page = 'home' | 'practice' | 'bank' | 'answer' | 'wrong' | 'favorites' | 'history' | 'settings';
 const store = useStudyStore();
@@ -32,28 +32,25 @@ const wrongActionError = ref('');
 const wrongActionBusy = computed(() => wrongBatchBusy.value || store.busy);
 const filter = reactive({ category: 'all', chapter: 'all', type: 'all', difficulty: 'all', mode: 'sequential' as StudyMode, count: 20, minutes: 30 });
 const questionCountValid = computed(() => Number.isInteger(filter.count) && filter.count >= 1 && filter.count <= 500);
-const followup = ref('');
 const aiPanel = ref<HTMLElement | null>(null);
 const clock = ref(Date.now());
 const apiBusy = ref(false);
-const apiTask = ref<'explain' | 'read' | null>(null);
+const apiTask = ref<'retrieve' | 'read' | null>(null);
 const apiSaving = ref(false);
 const apiError = ref<{ questionId: string; message: string; unconfirmed?: boolean } | null>(null);
-type ApiSavedReply = AiExplanation & { questionRevision: number; userAnswer: string[] };
-const apiSavedReplies = reactive<Record<string, ApiSavedReply>>({});
-const apiReplyDetails = reactive<Record<string, ApiSavedReply>>({});
-const retrievalOverrides = reactive<Record<string, boolean>>({});
-const retrievalEnabled = computed({
-  get: () => store.ai.retrievalAvailable === true && ((question.value && retrievalOverrides[question.value.id]) ?? store.ai.retrievalEnabled === true),
-  set: value => { if (question.value && !aiBusy.value) retrievalOverrides[question.value.id] = store.ai.retrievalAvailable === true && value; },
-});
+const retrievalOpen = ref(false);
+const retrievalLoading = ref(false);
+const retrievalError = ref('');
+const retrievedEntries = reactive<Record<string, RetrievalArchiveEntry[]>>({});
+const uncertainRetrievalIds = reactive(new Set<string>());
+let retrievalReadRequest = 0;
 const aiBusy = computed(() => apiBusy.value || apiSaving.value);
-const aiDraft = reactive({ baseUrl: '', model: '', apiKey: '', retrievalEnabled: false });
+const aiDraft = reactive({ apiKey: '' });
 const importInput = ref<HTMLInputElement | null>(null);
 let timer: ReturnType<typeof setInterval>;
 let disposed = false;
 let autoFinishedId = '';
-const apiUi = computed(() => ({ state: store.ai.configured ? 'ready' : 'offline', symbol: store.ai.configured ? '●' : '○', label: store.ai.configured ? 'API 已配置' : 'API 未配置', detail: '在学习设置中配置 API 地址、模型和密钥，只有主动解析时才调用。' }));
+const apiUi = computed(() => ({ state: store.ai.configured ? 'ready' : 'offline', symbol: store.ai.configured ? '●' : '○', label: store.ai.configured ? '检索已配置' : '检索未配置', detail: '固定使用 DeepSeek 官方 Search／Fetch，只有主动检索时才访问网页资料，不调用生成模型。' }));
 
 function rememberSidebarWidth() {
   try { localStorage.setItem(sidebarStorageKey, String(preferredSidebarWidth.value)); } catch { /* 浏览器禁用存储时，当前页面仍可调整。 */ }
@@ -177,6 +174,11 @@ const historyError = ref('');
 const historyEntries = ref<TextVersion[]>([]);
 let historyRequest = 0;
 const versionNames = { note: '学习笔记', reason: '错因', aiNote: 'AI 解析' };
+const aiHistoryOpen = ref(false);
+const aiHistoryLoading = ref(false);
+const aiHistoryError = ref('');
+const aiHistoryEntries = ref<AiHistoryEntry[]>([]);
+let aiHistoryRequest = 0;
 function reconcileNoteDraft(id: string | undefined, savedNote = '', savedReason = '') {
   if (!id || noteSavingIds.has(id)) return;
   const draft = drafts[id];
@@ -199,31 +201,33 @@ watch(drafts, () => {
   } catch { draftStorageError.value = '浏览器未能暂存草稿，刷新或关闭前请先复制。'; }
 }, { deep: true, flush: 'sync' });
 watch(() => [question.value?.id, progress.value.note, progress.value.reason] as const, ([id, savedNote, savedReason]) => reconcileNoteDraft(id, savedNote, savedReason), { immediate: true });
-const currentApiSavedReply = computed(() => {
-  const q = question.value;
-  const saved = q && apiSavedReplies[q.id];
-  return saved && saved.questionRevision === (q?.answerRevision ?? 0) ? saved : null;
-});
-const currentApiReplyDetail = computed(() => {
-  const q = question.value;
-  const saved = q && apiReplyDetails[q.id];
-  return saved && saved.questionRevision === (q?.answerRevision ?? 0) && saved.text === (currentApiSavedReply.value?.text ?? progress.value.aiNote) ? saved : null;
-});
-const currentApiSources = computed(() => (currentApiReplyDetail.value?.sources || []).flatMap(source => {
-  try {
-    const url = new URL(source.url);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return [];
-    return [{ id: source.id, title: source.title || url.hostname, url: url.href }];
-  } catch { return []; }
-}));
-const aiActionLabel = computed(() => apiSaving.value ? '正在保存配置…' : apiBusy.value ? apiTask.value === 'read' ? '正在读取解析…' : '正在生成解析…' : currentApiSavedReply.value ? '刷新已保存解析' : apiError.value?.questionId === question.value?.id && apiError.value.unconfirmed ? '读取已保存解析' : store.ai.configured ? '✦ AI 解析' : '配置 AI 解析');
-const draftRetrievalAvailable = computed(() => /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(aiDraft.baseUrl));
+const currentRetrievedEntries = computed(() => question.value ? retrievedEntries[question.value.id] ?? [] : []);
+function safeAiSources(sources: AiSource[] = []) {
+  return sources.flatMap(source => {
+    try {
+      const url = new URL(source.url);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return [];
+      return [{ id: source.id, title: source.title || url.hostname, url: url.href }];
+    } catch { return []; }
+  });
+}
+function retrievalSourceUrl(source: RetrievalSource) {
+  return safeAiSources([{ ...source, url: source.originalUrl || source.url }])[0]?.url || safeAiSources([source])[0]?.url;
+}
+function retrievalSourceDescription(source: RetrievalSource) {
+  if (source.sourceKind === 'document-extract' && source.documentType === 'pdf') {
+    return `Search 返回的 PDF 文字摘录${source.fetchSkipped ? '；未调用 Fetch' : ''}；非 PDF 全文或已核验解析`;
+  }
+  return source.contentOrigin === 'search' ? 'Search 返回的网页正文' : source.contentOrigin === 'fetch' ? 'Fetch 抓取的网页正文' : '网页正文（旧记录未标注获取方式）';
+}
+function locallyRecoveredSources(entry: RetrievalArchiveEntry) {
+  const recovery = entry.localRecovery;
+  if (entry.status !== 'failed' || recovery?.kind !== 'saved-search-text' || recovery.parentArchiveId !== entry.id ||
+    recovery.networkRequested !== false || recovery.modelRequested !== false) return [];
+  return recovery.sources.filter(source => !entry.sources.some(saved => saved.url === source.url)).slice(0, Math.max(0, 2 - entry.sources.length));
+}
+const aiActionLabel = computed(() => apiSaving.value ? '正在保存配置…' : apiBusy.value ? apiTask.value === 'read' ? '正在读取检索记录…' : '正在检索网页…' : question.value && uncertainRetrievalIds.has(question.value.id) ? '读取检索记录' : currentRetrievedEntries.value.some(entry => entry.currentFingerprintMatch) ? '查看已保存网页资料' : store.ai.configured ? '检索网页并保存' : '配置网页检索');
 const answer = computed(() => question.value ? (reviewId.value ? progress.value.lastAnswer : session.value?.answers[question.value.id] || []) : []);
-const personalAnswerNotice = computed(() => {
-  const saved = currentApiReplyDetail.value;
-  if (!saved || [...saved.userAnswer].sort().join(',') === [...answer.value].sort().join(',')) return '';
-  return `这份个性化解析针对当时选择的 ${saved.userAnswer.join('、') || '未作答'}；当前查看的选择为 ${answer.value.join('、') || '未作答'}。`;
-});
 const revealed = computed(() => !!reviewId.value || session.value?.status === 'completed' || !!(question.value && session.value?.submittedQuestionIds.includes(question.value.id)));
 const grading = computed(() => question.value ? studyGradingResult(question.value, reviewId.value ? null : session.value, answer.value) : undefined);
 function wasIncorrect(id: string) {
@@ -234,7 +238,7 @@ const examActive = computed(() => !reviewId.value && session.value?.mode === 'ex
 const remaining = computed(() => session.value?.deadlineAt ? Math.max(0, Math.ceil((Date.parse(session.value.deadlineAt) - clock.value) / 1000)) : 0);
 const timeText = computed(() => `${Math.floor(remaining.value / 60).toString().padStart(2, '0')}:${(remaining.value % 60).toString().padStart(2, '0')}`);
 const selectedCount = computed(() => session.value ? session.value.questionIds.filter(id => session.value!.answers[id]?.length).length : 0);
-const date = (value?: string) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : '—';
+const date = (value?: string) => value ? new Date(value).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : '—';
 const categoryInfo = computed(() => availableCategories.value.map(name => {
   const qs = availableBank.value.filter(q => q.category === name);
   return { name, chapters: [...new Set(qs.map(q => q.chapter))].slice(0, 3).join(' · '), index: store.categories.indexOf(name) + 1, count: qs.length, done: qs.filter(q => store.progress[q.id]?.attempts).length, wrong: qs.filter(q => (store.progress[q.id]?.wrongCount || 0) > 0 && !store.progress[q.id]?.wrongRemoved && !store.progress[q.id]?.mastered).length };
@@ -401,6 +405,41 @@ async function loadTextHistory() {
   } catch (failure: any) { if (request === historyRequest) historyError.value = failure.message || '历史暂未载入'; }
   finally { if (request === historyRequest) historyLoading.value = false; }
 }
+async function loadAiHistory(id = question.value?.id, open = true) {
+  if (!id || question.value?.id !== id || (!open && !aiHistoryOpen.value)) return;
+  const request = ++aiHistoryRequest;
+  if (open) aiHistoryOpen.value = true;
+  aiHistoryLoading.value = true; aiHistoryError.value = '';
+  try {
+    const result = await api.loadAiHistory(id);
+    if (request === aiHistoryRequest && question.value?.id === id && aiHistoryOpen.value) aiHistoryEntries.value = result.entries;
+  } catch (failure: any) {
+    if (request === aiHistoryRequest && question.value?.id === id && aiHistoryOpen.value) aiHistoryError.value = failure.message || 'AI 解析历史暂未载入';
+  } finally {
+    if (request === aiHistoryRequest) aiHistoryLoading.value = false;
+  }
+}
+async function toggleAiHistory() {
+  if (!aiHistoryOpen.value) { await loadAiHistory(); return; }
+  aiHistoryRequest++;
+  aiHistoryOpen.value = false;
+  aiHistoryLoading.value = false;
+}
+function refreshOpenAiHistory(id?: string) {
+  // Saving or rereading a response must not reopen a history panel that the
+  // learner closed or replace a different question's pending history request.
+  // History has its own loading/error state; it must not extend API busy time.
+  if (id && question.value?.id === id && aiHistoryOpen.value) void loadAiHistory(id, false);
+}
+function aiProviderLabel(entry: AiHistoryEntry) {
+  if (entry.transport === 'legacy') return '旧版保存解析';
+  if (entry.transport === 'web') return entry.provider === 'zhipu' ? '智谱清言网页' : entry.provider === 'deepseek' ? 'DeepSeek 网页' : `${entry.provider} 网页`;
+  return entry.model ? `模型 API · ${entry.model}` : '模型 API';
+}
+function aiHistoryStatus(entry: AiHistoryEntry) {
+  if (entry.status === 'legacy') return '生成信息未记录';
+  return entry.status === 'conflict' ? '冲突时保留' : '已保存为当时结果';
+}
 async function restoreTextVersion(entry: TextVersion) {
   const id = question.value?.id;
   if (!id) return;
@@ -420,78 +459,79 @@ async function reloadSavedAnswers() {
 }
 async function requestExplanation() {
   if (aiBusy.value || !question.value || !revealed.value || examActive.value) return;
-  if (currentApiSavedReply.value) await refreshApiSavedReply(question.value.id);
-  else if (apiError.value?.unconfirmed && apiError.value.questionId === question.value.id) await readUnconfirmedApiReply(question.value.id);
-  else if (!store.ai.configured) { go('settings'); ElMessage.info('请先配置模型 API，再主动发起解析。'); }
-  else {
-    aiPanel.value?.scrollIntoView?.({ behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
-    aiPanel.value?.focus?.({ preventScroll: true });
-    await apiExplain();
-  }
-}
-async function readUnconfirmedApiReply(targetId: string) {
-  if (aiBusy.value) return;
-  apiBusy.value = true;
-  apiTask.value = 'read';
-  try {
-    await store.refreshProgress();
-    apiError.value = { questionId: targetId, message: '已读取当前保存的解析。上次 API 调用结果仍可能未确认，重新发起可能再次调用或计费，请先核对正文与历史。' };
-  } catch {
-    apiError.value = { questionId: targetId, unconfirmed: true, message: '暂未能读取保存结果。请恢复本机连接后读取；重新发起可能再次调用或计费。' };
-  } finally { apiBusy.value = false; apiTask.value = null; }
-}
-async function refreshApiSavedReply(targetId: string) {
-  if (apiBusy.value) return;
-  apiBusy.value = true;
-  apiTask.value = 'read';
-  try {
-    await store.refreshProgress();
-    delete apiSavedReplies[targetId];
-    if (apiError.value?.questionId === targetId) apiError.value = null;
-    ElMessage.success('已刷新保存的 API 解析');
-  } catch {
-    apiError.value = { questionId: targetId, message: 'API 解析已保存，读取本机结果暂未完成。点击“刷新已保存解析”只会重读结果，不会再次调用模型。' };
-  } finally { apiBusy.value = false; apiTask.value = null; }
-}
-async function apiExplain() {
-  if (!question.value || !revealed.value || examActive.value || aiBusy.value || !store.ai.configured) return;
-  if (followup.value.length > 1500) { ElMessage.error('补充追问最多 1500 字，请缩短后再发送。'); return; }
+  aiPanel.value?.scrollIntoView?.({ behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+  aiPanel.value?.focus?.({ preventScroll: true });
   const targetId = question.value.id;
-  const payload = { questionId: targetId, answer: [...answer.value], question: followup.value, expectedQuestionRevision: question.value.answerRevision ?? 0, retrievalEnabled: retrievalEnabled.value };
+  const expectedQuestionRevision = question.value.answerRevision ?? 0;
+  const readOnly = uncertainRetrievalIds.has(targetId);
   apiBusy.value = true;
-  apiTask.value = 'explain';
-  apiError.value = null;
+  apiTask.value = 'read';
   try {
-    const result = await api.explainStudyQuestion(payload);
-    const saved = { ...result, questionRevision: payload.expectedQuestionRevision, userAnswer: payload.answer };
-    apiSavedReplies[targetId] = saved;
-    apiReplyDetails[targetId] = saved;
-    try {
-      await store.refreshProgress();
-      delete apiSavedReplies[targetId];
-      ElMessage.success('API 解析已保存');
-    } catch {
-      apiError.value = { questionId: targetId, message: 'API 解析已保存，读取本机结果暂未完成。点击“刷新已保存解析”只会重读结果，不会再次调用模型。' };
+    // Reconcile durable local records before any potentially charged request.
+    const existing = await api.loadRetrievalHistory(targetId);
+    retrievedEntries[targetId] = existing.entries;
+    if (disposed || question.value?.id !== targetId || page.value !== 'answer') return;
+    retrievalOpen.value = true;
+    apiError.value = null;
+    const current = existing.entries.find(entry => entry.currentFingerprintMatch);
+    if (current) { reportRetrieval(current, true); return; }
+    if (readOnly) {
+      apiError.value = { questionId: targetId, unconfirmed: true, message: '上次检索结果仍未确认，仅重读本机记录，未重新调用 Search／Fetch。' };
+      return;
     }
+    if (!store.ai.configured) { go('settings'); ElMessage.info('请先配置 DeepSeek 官方检索密钥。'); return; }
+    apiTask.value = 'retrieve';
+    const result = await api.retrieveStudyQuestion({ questionId: targetId, expectedQuestionRevision, requestId: crypto.randomUUID() });
+    // Retain each result under its target; navigating never displays it on another question.
+    retrievedEntries[targetId] = [result.entry, ...existing.entries.filter(entry => entry.questionFingerprint !== result.entry.questionFingerprint)];
+    if (result.entry.status === 'running' || result.entry.status === 'unknown') uncertainRetrievalIds.add(targetId);
+    else uncertainRetrievalIds.delete(targetId);
+    if (!disposed && question.value?.id === targetId) { retrievalReadRequest++; retrievalLoading.value = false; reportRetrieval(result.entry, result.cached); }
   } catch (failure: any) {
-    const unconfirmed = !failure.status || failure.status >= 500;
-    apiError.value = { questionId: targetId, unconfirmed, message: `${failure.message || 'API 调用未完成，原解析保留。'}${unconfirmed ? ' 调用结果未确认，请先读取已保存解析；重新发起可能再次调用或计费。' : ''}` };
-    if (failure.status === 409) { try { await store.refreshProgress(); } catch { /* The saved result remains on the server. */ } }
+    const unconfirmed = apiTask.value === 'retrieve' && (!failure.status || failure.status >= 500);
+    if (unconfirmed) uncertainRetrievalIds.add(targetId);
+    apiError.value = { questionId: targetId, unconfirmed, message: `${failure.message || '网页检索未完成，已保存资料保留。'}${unconfirmed ? ' 结果未确认，请读取检索记录，不会自动重发。' : ''}` };
   } finally { apiBusy.value = false; apiTask.value = null; }
 }
-function useDeepSeekDefaults() {
-  if (aiBusy.value) return;
-  Object.assign(aiDraft, { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-flash', apiKey: '', retrievalEnabled: false });
+function retrievalStatus(entry: RetrievalArchiveEntry) {
+  if (entry.status === 'completed' && entry.partial) return '部分来源未抓取，已保存可用正文';
+  if (entry.status === 'completed' && entry.sources.some(source => source.sourceKind === 'document-extract')) return '网页／文档资料已保存';
+  return { completed: '网页正文已保存', running: '检索进行中', failed: '检索失败，未自动重试', unknown: '结果未知，未自动重发' }[entry.status];
+}
+function reportRetrieval(entry: RetrievalArchiveEntry, cached: boolean) {
+  if (entry.status === 'running' || entry.status === 'unknown') uncertainRetrievalIds.add(entry.questionId);
+  else uncertainRetrievalIds.delete(entry.questionId);
+  if (entry.status === 'completed') {
+    apiError.value = null;
+    const hasDocumentExtract = entry.sources.some(source => source.sourceKind === 'document-extract');
+    ElMessage.success(entry.partial ? cached ? '已读取本机可用正文，部分来源未抓取' : '部分来源未抓取，已保存可用正文' : hasDocumentExtract ? cached ? '已读取本机网页／文档资料，未再次检索' : '网页／文档资料已保存' : cached ? '已读取本机网页资料，未再次检索' : '网页来源与正文已保存');
+  } else apiError.value = { questionId: entry.questionId, unconfirmed: entry.status === 'running' || entry.status === 'unknown', message: entry.error || retrievalStatus(entry) };
+}
+async function loadRetrievalHistory(open = true) {
+  const id = question.value?.id;
+  if (!id || (!open && !retrievalOpen.value)) return;
+  const request = ++retrievalReadRequest;
+  if (open) retrievalOpen.value = true;
+  retrievalLoading.value = true; retrievalError.value = '';
+  try {
+    const result = await api.loadRetrievalHistory(id);
+    if (request === retrievalReadRequest && question.value?.id === id && retrievalOpen.value) retrievedEntries[id] = result.entries;
+  } catch (failure: any) {
+    if (request === retrievalReadRequest && question.value?.id === id && retrievalOpen.value) retrievalError.value = failure.message || '检索记录暂未载入';
+  } finally { if (request === retrievalReadRequest) retrievalLoading.value = false; }
+}
+async function toggleRetrievalHistory() {
+  if (!retrievalOpen.value) { await loadRetrievalHistory(); return; }
+  retrievalReadRequest++; retrievalOpen.value = false; retrievalLoading.value = false;
 }
 async function saveApi(clearApiKey = false) {
   if (aiBusy.value) return;
   apiSaving.value = true;
   try {
-    const saved = await api.saveAiSettings({ baseUrl: aiDraft.baseUrl, model: aiDraft.model, retrievalEnabled: !clearApiKey && draftRetrievalAvailable.value && aiDraft.retrievalEnabled, ...(clearApiKey ? { clearApiKey: true } : { apiKey: aiDraft.apiKey }) });
+    const saved = await api.saveAiSettings({ baseUrl: 'https://api.deepseek.com/v1', ...(clearApiKey ? { clearApiKey: true } : { apiKey: aiDraft.apiKey }) });
     store.ai = { ...saved, retrievalAvailable: saved.retrievalAvailable === true, retrievalEnabled: saved.retrievalAvailable === true && saved.retrievalEnabled === true };
-    Object.assign(aiDraft, { baseUrl: store.ai.baseUrl, model: store.ai.model, retrievalEnabled: store.ai.retrievalEnabled });
     aiDraft.apiKey = '';
-    ElMessage.success(clearApiKey ? '本机 API 密钥已清除' : store.ai.configured ? '模型配置已保存' : '地址和模型已保存，请填写该服务对应的 API 密钥。');
+    ElMessage.success(clearApiKey ? '本机检索密钥已清除' : store.ai.configured ? '网页检索配置已保存' : '请填写 DeepSeek 官方 API 密钥。');
   } catch { ElMessage.error('配置未保存，请检查本机服务和配置格式。'); }
   finally { apiSaving.value = false; }
 }
@@ -505,18 +545,20 @@ async function exportData() {
 async function importData(event: Event) {
   const target = event.target as HTMLInputElement;
   const file = target.files?.[0]; if (!file) return;
+  const historyTargetId = question.value?.id;
   await safe(async () => {
     if (file.size > 64 * 1024 * 1024) throw new Error('备份不能超过 64MB');
     const data = JSON.parse(await file.text());
     const response = await fetch('/study-api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
     const result = await response.json(); if (!response.ok) throw new Error(result.error || '导入失败');
     await store.bootstrap(); ElMessage.success(`新增 ${result.progressCount || 0} 道题目记录、${result.sessionCount || 0} 条练习；保留现有内容，${result.conflictCount || 0} 项差异未覆盖。`);
+    refreshOpenAiHistory(historyTargetId);
   });
   target.value = '';
 }
 watch(() => filter.category, () => { filter.chapter = 'all'; });
 watch(() => store.activeSession?.id, () => { autoFinishedId = ''; });
-watch(() => question.value?.id, () => { followup.value = ''; historyRequest++; historyOpen.value = false; historyEntries.value = []; historyError.value = ''; historyLoading.value = false; });
+watch(() => question.value?.id, () => { historyRequest++; historyOpen.value = false; historyEntries.value = []; historyError.value = ''; historyLoading.value = false; aiHistoryRequest++; aiHistoryOpen.value = false; aiHistoryEntries.value = []; aiHistoryError.value = ''; aiHistoryLoading.value = false; retrievalReadRequest++; retrievalOpen.value = false; retrievalLoading.value = false; retrievalError.value = ''; });
 onMounted(async () => {
   try {
     const saved = localStorage.getItem(sidebarStorageKey);
@@ -524,7 +566,7 @@ onMounted(async () => {
   } catch { /* 未允许存储时使用默认宽度。 */ }
   updateViewportWidth();
   window.addEventListener('resize', updateViewportWidth);
-  await safe(async () => { await store.bootstrap(); Object.assign(aiDraft, { baseUrl: store.ai.baseUrl, model: store.ai.model, retrievalEnabled: store.ai.retrievalEnabled === true }); });
+  await safe(async () => { await store.bootstrap(); });
   if (disposed) return;
   timer = setInterval(() => {
     clock.value = Date.now();
@@ -550,7 +592,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer); window.removeEventLis
     <div v-if="desktopSidebar" class="sidebar-resizer" role="separator" tabindex="0" aria-label="调整左侧导航宽度" aria-orientation="vertical" aria-controls="study-sidebar study-main" :aria-valuemin="sidebarMinWidth" :aria-valuemax="sidebarMaxWidth" :aria-valuenow="sidebarWidth" :aria-valuetext="sidebarWidth + ' 像素'" title="左右拖动调整宽度；方向键微调，双击恢复默认" @pointerdown="beginSidebarResize" @pointermove="moveSidebarResize" @pointerup="stopSidebarResize" @pointercancel="stopSidebarResize" @lostpointercapture="stopSidebarResize" @keydown="resizeSidebarByKey" @dblclick="resetSidebarWidth"><span aria-hidden="true"></span></div>
 
     <main id="study-main" class="main">
-      <header class="topbar"><div><span class="breadcrumb">我的学习 <i>/</i></span> {{ titles[page] }}</div><div class="topbar-status"><button class="ai-status" :data-state="apiUi.state" :title="apiUi.detail" @click="go('settings')"><span aria-hidden="true">{{ apiUi.symbol }}</span><span role="status" aria-live="polite">{{ 'AI 解析 · ' + apiUi.label }}</span></button><div class="top-meta"><span class="tiny-dot"></span> 学习记录保存在本机 <span class="today">{{ new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' }) }}</span></div></div></header>
+      <header class="topbar"><div><span class="breadcrumb">我的学习 <i>/</i></span> {{ titles[page] }}</div><div class="topbar-status"><button class="ai-status" :data-state="apiUi.state" :title="apiUi.detail" @click="go('settings')"><span aria-hidden="true">{{ apiUi.symbol }}</span><span role="status" aria-live="polite">{{ '网页资料 · ' + apiUi.label }}</span></button><div class="top-meta"><span class="tiny-dot"></span> 学习记录保存在本机 <span class="today">{{ new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' }) }}</span></div></div></header>
       <div v-if="store.loading" class="loading-state">正在打开你的学习空间…</div>
       <div v-else-if="!store.loaded" class="empty-state"><h2>暂时未能连接学习服务</h2><p>{{ store.error }}</p><button class="btn primary" @click="safe(() => store.bootstrap())">重新连接</button></div>
       <div v-else class="content">
@@ -568,7 +610,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer); window.removeEventLis
           <section class="metrics" aria-label="学习统计"><div><span>已练题目</span><strong>{{ availableAnsweredCount }}<small>/ {{ availableBank.length }}</small></strong><p>一点一滴，积累知识版图</p></div><div><span>累计正确率</span><strong>{{ store.answeredCount ? store.accuracy + '%' : '—' }}</strong><p>按全部已判分作答次数统计</p></div><div><span>待巩固错题</span><strong class="warm">{{ pendingWrong.length }}<small>题</small></strong><button @click="go('wrong')">去研究错因 →</button></div><div><span>已完成练习</span><strong>{{ completed.length }}<small>次</small></strong><button @click="go('history')">查看学习足迹 →</button></div></section>
           <div class="section-heading"><div><p class="eyebrow">QUESTION BANK</p><h2>按方向，逐个攻克</h2></div><span>{{ availableBank.length }} 道可用题目 · 附答案与解析</span><button class="btn ghost" @click="go('bank')">浏览与管理题库 →</button></div>
           <section class="category-grid"><button v-for="item in categoryInfo" :key="item.name" class="category-card" @click="configure(item.name)"><div class="category-top"><span class="category-index">0{{ item.index }}</span><span class="category-count">{{ item.count }} 题</span></div><h3>{{ item.name }}</h3><p>{{ item.chapters }}</p><div class="progress-track"><span :style="{ width: item.done / item.count * 100 + '%' }"></span></div><footer><span>已练 {{ item.done }} / {{ item.count }}</span><b>{{ item.wrong ? item.wrong + ' 题待巩固' : '进入练习 →' }}</b></footer></button></section>
-          <div class="home-bottom"><section class="panel compact"><div class="section-heading small-heading"><h2>最近的学习足迹</h2><button class="text-btn" @click="go('history')">全部记录 →</button></div><div v-if="!visibleSessions.length" class="inline-empty">你的第一次练习，会从这里开始。</div><button v-for="s in visibleSessions.slice(0, 3)" :key="s.id" class="history-line" @click="history(s)"><span class="record-icon">{{ s.mode === 'exam' ? '◎' : '▤' }}</span><span><b>{{ modeNames[s.mode] }}</b><small>{{ date(s.createdAt) }} · {{ s.questionIds.length }} 题</small></span><strong>{{ s.status === 'active' ? '继续答题 →' : s.score + '%' }}</strong></button></section><section class="ai-promo"><span class="eyebrow">UNDERSTAND, DON'T MEMORIZE</span><h2>不止知道答案，<br>更要理解为什么。</h2><p>用模型 API 比较本次选择，按需联网核对来源。</p><button class="text-btn" @click="go('settings')">配置 AI 解析 →</button></section></div>
+          <div class="home-bottom"><section class="panel compact"><div class="section-heading small-heading"><h2>最近的学习足迹</h2><button class="text-btn" @click="go('history')">全部记录 →</button></div><div v-if="!visibleSessions.length" class="inline-empty">你的第一次练习，会从这里开始。</div><button v-for="s in visibleSessions.slice(0, 3)" :key="s.id" class="history-line" @click="history(s)"><span class="record-icon">{{ s.mode === 'exam' ? '◎' : '▤' }}</span><span><b>{{ modeNames[s.mode] }}</b><small>{{ date(s.createdAt) }} · {{ s.questionIds.length }} 题</small></span><strong>{{ s.status === 'active' ? '继续答题 →' : s.score + '%' }}</strong></button></section><section class="ai-promo"><span class="eyebrow">UNDERSTAND, DON'T MEMORIZE</span><h2>不止知道答案，<br>更要理解为什么。</h2><p>用 Search／Fetch 保存公开网页来源与原文，按题目随时回看。</p><button class="text-btn" @click="go('settings')">配置网页检索 →</button></section></div>
         </template>
 
         <StudyManagement v-if="page === 'bank' || page === 'history'" :key="page" :kind="page === 'bank' ? 'bank' : 'history'" @review="review" @session="history" @practice="configure()" />
@@ -585,7 +627,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer); window.removeEventLis
         <template v-if="page === 'answer' && question">
           <div class="answer-heading"><button class="text-btn" @click="go(previousPage)">← 返回{{ titles[previousPage] }}</button><span v-if="examActive" class="exam-clock">剩余时间 {{ timeText }}</span><span v-else class="muted">{{ reviewId ? '研究易错点，形成自己的理解' : store.saveState === 'saving' ? '正在保存…' : store.saveState === 'error' ? '保存失败，请重选答案重试' : '答题进度已保存' }}</span></div>
           <div v-if="!reviewId && session?.status === 'completed'" class="result-banner"><div><small>本次已完成</small><h2>正确率 {{ session.score }}%</h2><p>答对 {{ session.correctCount }} / {{ session.questionIds.length }} 题 · 可以逐题复盘</p></div><button class="btn light" @click="go('wrong')">研究错题 →</button></div>
-          <div v-if="store.hasAnswerConflicts" class="integrity-warning answer-conflict" role="alert"><b>其他页面已更改答案，本页选择已保留，提交已暂停。</b><p>请先记下需要保留的选择，再载入已保存答案。</p><button class="btn ghost" @click="reloadSavedAnswers">载入已保存答案</button></div><div class="answer-layout"><div class="answer-main"><section class="panel question-panel"><div class="question-meta"><div><span class="pill">{{ question.type === 'single' ? '单选题' : '多选题' }}</span><span>{{ question.category }}</span><span>· {{ question.difficulty }}</span></div><button class="text-btn favorite" @click="patch({ favorite: !progress.favorite })">{{ progress.favorite ? '★ 已收藏' : '☆ 收藏本题' }}</button></div><p class="question-number">{{ reviewId ? question.id : `${(session?.cursor || 0) + 1} / ${session?.questionIds.length}` }} <span>{{ question.chapter }}</span></p><h1 class="question-stem">{{ question.stem }}</h1><p v-if="question.type === 'multiple'" class="selection-hint">请选择所有正确选项，全部选对才计为正确。</p><div class="option-list"><button v-for="o in question.options" :key="o.id" :class="['option', { chosen: answer.includes(o.id), correct: revealed && grading?.answer.includes(o.id), incorrect: revealed && answer.includes(o.id) && !grading?.answer.includes(o.id) }]" :disabled="revealed || store.busy" :aria-pressed="answer.includes(o.id)" @click="select(o.id)"><span class="option-letter">{{ o.id }}</span><span>{{ o.text }}</span><b v-if="revealed && grading?.answer.includes(o.id)">✓</b><b v-else-if="revealed && answer.includes(o.id)">×</b></button></div><div class="question-actions"><span class="muted">{{ answer.length ? '已选 ' + answer.join('、') : '请选择你的答案' }}</span><button v-if="!revealed && !examActive" class="btn primary" :disabled="!answer.length || store.busy || store.hasAnswerConflicts" @click="safe(() => store.checkCurrent())">提交答案</button><span v-if="examActive" class="muted">整卷提交后查看解析</span></div><div v-if="revealed" class="explanation"><div class="result-line"><b :class="grading?.correct ? 'good' : 'bad'">{{ grading?.correct ? '✓ 回答正确' : '✕ 还需要巩固' }}</b><span>{{ grading?.snapshot ? '当时标准答案' : '当前标准答案' }} <strong>{{ grading?.answer.join('、') }}</strong> <i>你的答案 {{ answer.join('、') || '未作答' }}</i></span></div><div class="result-ai-entry"><div><b>{{ grading?.correct ? '答对也能 AI 解析' : '用 AI 核对解题思路' }}</b><p>逐项理解选项，理清易混点，确认自己为什么选它。</p></div><button class="btn primary" aria-label="AI 解析这道题" :disabled="aiBusy" @click="requestExplanation">{{ aiActionLabel }}</button></div><div v-if="grading?.standardUpdated" class="standard-update" role="status"><b>标准答案已更新</b><br>本次记录保留当时判分标准、解析和成绩。当前标准答案：{{ question.answer.join('、') }}。<details><summary>查看当前解析</summary><p>{{ question.explanation }}</p></details></div><p v-if="reviewId" class="muted">按当前标准比对最后一次作答；原学习记录和成绩保持不变。</p><h3>{{ grading?.snapshot ? '当时题目解析' : '题目解析' }}</h3><p>{{ grading?.explanation }}</p><div class="knowledge">知识点 · {{ question.knowledgePoint }}</div></div><footer v-if="!reviewId && session" class="question-footer"><button class="btn ghost" :disabled="!session.cursor" @click="safe(() => store.navigate((session?.cursor || 0) - 1))">← 上一题</button><button v-if="(session.cursor || 0) < session.questionIds.length - 1" class="btn primary" @click="safe(() => store.navigate((session?.cursor || 0) + 1))">下一题 →</button><button v-else-if="session.status === 'active'" class="btn primary" :disabled="store.busy || store.hasAnswerConflicts" @click="finish()">完成并交卷</button><button v-else class="btn primary" @click="go('history')">返回学习记录</button></footer></section>
+          <div v-if="store.hasAnswerConflicts" class="integrity-warning answer-conflict" role="alert"><b>其他页面已更改答案，本页选择已保留，提交已暂停。</b><p>请先记下需要保留的选择，再载入已保存答案。</p><button class="btn ghost" @click="reloadSavedAnswers">载入已保存答案</button></div><div class="answer-layout"><div class="answer-main"><section class="panel question-panel"><div class="question-meta"><div><span class="pill">{{ question.type === 'single' ? '单选题' : '多选题' }}</span><span>{{ question.category }}</span><span>· {{ question.difficulty }}</span></div><button class="text-btn favorite" @click="patch({ favorite: !progress.favorite })">{{ progress.favorite ? '★ 已收藏' : '☆ 收藏本题' }}</button></div><p class="question-number">{{ reviewId ? question.id : `${(session?.cursor || 0) + 1} / ${session?.questionIds.length}` }} <span>{{ question.chapter }}</span></p><h1 class="question-stem">{{ question.stem }}</h1><p v-if="question.type === 'multiple'" class="selection-hint">请选择所有正确选项，全部选对才计为正确。</p><div class="option-list"><button v-for="o in question.options" :key="o.id" :class="['option', { chosen: answer.includes(o.id), correct: revealed && grading?.answer.includes(o.id), incorrect: revealed && answer.includes(o.id) && !grading?.answer.includes(o.id) }]" :disabled="revealed || store.busy" :aria-pressed="answer.includes(o.id)" @click="select(o.id)"><span class="option-letter">{{ o.id }}</span><span>{{ o.text }}</span><b v-if="revealed && grading?.answer.includes(o.id)">✓</b><b v-else-if="revealed && answer.includes(o.id)">×</b></button></div><div class="question-actions"><span class="muted">{{ answer.length ? '已选 ' + answer.join('、') : '请选择你的答案' }}</span><button v-if="!revealed && !examActive" class="btn primary" :disabled="!answer.length || store.busy || store.hasAnswerConflicts" @click="safe(() => store.checkCurrent())">提交答案</button><span v-if="examActive" class="muted">整卷提交后查看解析</span></div><div v-if="revealed" class="explanation"><div class="result-line"><b :class="grading?.correct ? 'good' : 'bad'">{{ grading?.correct ? '✓ 回答正确' : '✕ 还需要巩固' }}</b><span>{{ grading?.snapshot ? '当时标准答案' : '当前标准答案' }} <strong>{{ grading?.answer.join('、') }}</strong> <i>你的答案 {{ answer.join('、') || '未作答' }}</i></span></div><div class="result-ai-entry"><div><b>查找本题网页与文档资料</b><p>Search 查找来源与文档摘录，Fetch 保存网页原文；不调用生成模型。</p></div><button class="btn primary" aria-label="检索本题网页资料" :disabled="aiBusy" @click="requestExplanation">{{ aiActionLabel }}</button></div><div v-if="grading?.standardUpdated" class="standard-update" role="status"><b>标准答案已更新</b><br>本次记录保留当时判分标准、解析和成绩。当前标准答案：{{ question.answer.join('、') }}。<details><summary>查看当前解析</summary><p>{{ question.explanation }}</p></details></div><p v-if="reviewId" class="muted">按当前标准比对最后一次作答；原学习记录和成绩保持不变。</p><h3>{{ grading?.snapshot ? '当时题目解析' : '题目解析' }}</h3><p>{{ grading?.explanation }}</p><div class="knowledge">知识点 · {{ question.knowledgePoint }}</div></div><footer v-if="!reviewId && session" class="question-footer"><button class="btn ghost" :disabled="!session.cursor" @click="safe(() => store.navigate((session?.cursor || 0) - 1))">← 上一题</button><button v-if="(session.cursor || 0) < session.questionIds.length - 1" class="btn primary" @click="safe(() => store.navigate((session?.cursor || 0) + 1))">下一题 →</button><button v-else-if="session.status === 'active'" class="btn primary" :disabled="store.busy || store.hasAnswerConflicts" @click="finish()">完成并交卷</button><button v-else class="btn primary" @click="go('history')">返回学习记录</button></footer></section>
             <section v-if="revealed" class="panel research-panel">
               <div class="section-heading small-heading"><h2>错因与学习笔记</h2><button v-if="!progress.wrongRemoved && !store.questionRecords?.[question.id]?.removed" class="text-btn" :disabled="wrongActionBusy" @click="toggleQuestionMastery">{{ progress.mastered ? '✓ 已掌握 · 重新巩固' : '标记为已掌握' }}</button></div>
               <p v-if="wrongActionError" class="mastery-error" role="alert">{{ wrongActionError }}</p>
@@ -599,22 +641,56 @@ onUnmounted(() => { disposed = true; clearInterval(timer); window.removeEventLis
             </section>
             <PreparedExplanation v-if="revealed" :key="question.id" :question="question" @standard-updated="safe(() => store.refreshProgress())" />
             <section v-if="revealed" ref="aiPanel" class="panel ai-panel" tabindex="-1" aria-labelledby="question-ai-heading">
-              <div class="section-heading small-heading"><div><span class="eyebrow">MODEL API</span><h2 id="question-ai-heading">针对我的答案分析</h2></div><span :class="['connection', { connected: store.ai.configured }]">{{ apiUi.label }}</span></div>
-              <p class="muted">通过模型 API 比较本次选择与题库标准，补充解释疑点。只发送当前题目、当前作答和追问，不上传笔记或全部历史。</p>
-              <p v-if="!store.ai.configured" class="prepared-note" role="status">请先在学习设置中配置 API；题库已有讲解仍然可读。</p>
-              <p v-if="(question.answerRevision || 0) > 0" class="standard-update" role="status">AI 解析使用当前标准答案。以前保存的 AI 解析可能基于旧版答案，重新解析前请核对。</p>
-              <label>补充追问（可选，最多 1500 字）<input v-model="followup" aria-label="补充追问" placeholder="例如：这两个概念到底有什么区别？" maxlength="1500" :disabled="apiBusy"></label>
-              <label class="retrieval-toggle"><input v-model="retrievalEnabled" type="checkbox" aria-label="本题联网检索" :disabled="aiBusy || !store.ai.retrievalAvailable"> 联网核对来源（可选）</label>
-              <p class="fine-print">开启后每次最多 1 次 Search + 2 次 Fetch，检索约 0.015 元，另计模型 Token 费用。关闭时只调用模型。</p>
-              <p v-if="!store.ai.retrievalAvailable" class="fine-print">联网检索仅适用于已保存的 DeepSeek 官方 API 配置；当前只调用模型。</p>
+              <div class="section-heading small-heading"><div><span class="eyebrow">SEARCH / FETCH</span><h2 id="question-ai-heading">本题网页／文档资料</h2></div><span :class="['connection', { connected: store.ai.configured }]">{{ apiUi.label }}</span></div>
+              <p class="muted">固定使用 DeepSeek 官方 Search 查找公开网页与文档资料、Fetch 读取网页正文，并按题目保存来源与返回文本。PDF 只保留 Search 返回的文字摘录，不调用 Fetch。不调用生成模型，不发送个人作答、追问或笔记。</p>
+              <p v-if="!store.ai.configured" class="prepared-note" role="status">请先在学习设置中配置官方检索密钥；已有题目讲解和历史仍然可读。</p>
+              <p v-if="(question.answerRevision || 0) > 0" class="standard-update" role="status">网页资料按当前题目版本保存。旧版解析与原文仍可回看，请核对它们对应的题目版本。</p>
+              <p class="fine-print">每题版本最多检索一次，最多 1 次 Search 与 2 次 Fetch。已有记录直接读取；失败或结果未知不会自动重试。工具可能计费，以服务商账单为准。</p>
               <div class="ai-actions"><button class="btn primary" :disabled="aiBusy" @click="requestExplanation">{{ aiActionLabel }}</button></div>
-              <p v-if="apiBusy" role="status">{{ apiTask === 'read' ? '正在读取本机已保存解析，不会重新调用模型…' : '正在等待 API 回复…' }}</p>
+              <p v-if="apiBusy" role="status">{{ apiTask === 'read' ? '正在读取本机检索记录，不会访问外部网页…' : '正在通过 Search／Fetch 获取网页资料…' }}</p>
               <p v-if="apiError?.questionId === question.id" class="ai-refresh-error" role="alert">{{ apiError.message }}</p>
-              <p v-if="personalAnswerNotice" class="standard-update" role="status">{{ personalAnswerNotice }}</p>
-              <template v-if="currentApiSavedReply"><p class="ai-message" role="status">API 完整回复已保存</p><div class="ai-answer">{{ currentApiSavedReply.text }}</div></template>
-              <details v-else-if="progress.aiNote" class="ai-previous" open><summary>此前保存的个性化解析（请核对当时的选择与标准）</summary><div class="ai-answer">{{ progress.aiNote }}</div></details>
-              <section v-if="currentApiSources.length" class="ai-sources" aria-label="联网参考来源"><h3>参考来源</h3><ol><li v-for="source in currentApiSources" :key="source.id + source.url"><a :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span class="fine-print"> · {{ source.id }}</span></li></ol></section>
-              <p v-if="currentApiReplyDetail?.retrieval" class="fine-print">本次检索：{{ currentApiReplyDetail.retrieval.searchCalls }} 次 Search、{{ currentApiReplyDetail.retrieval.fetchCalls }} 次 Fetch，检索估算 {{ currentApiReplyDetail.retrieval.estimatedCostCny.toFixed(3) }} 元（不含模型 Token）。</p>
+              <section class="retrieval-history-section" aria-label="本题网页检索记录">
+                <div class="ai-history-tools"><button class="text-btn history-toggle" type="button" :aria-expanded="retrievalOpen" @click="toggleRetrievalHistory">{{ retrievalOpen ? '收起网页资料 ↑' : '查看已保存网页资料（只读） ↓' }}</button><button v-if="retrievalOpen" class="text-btn" type="button" :disabled="retrievalLoading" @click="loadRetrievalHistory(false)">刷新检索记录（只读）</button></div>
+                <div v-if="retrievalOpen">
+                  <p v-if="retrievalLoading" role="status">正在读取本机网页资料…</p><p v-else-if="retrievalError" role="alert">{{ retrievalError }}</p><p v-else-if="!currentRetrievedEntries.length" class="muted">本题暂无已保存网页资料。</p>
+                  <details v-for="entry in currentRetrievedEntries" :key="entry.id || entry.requestId" class="retrieval-history-entry">
+                    <summary><b>{{ retrievalStatus(entry) }}</b> · {{ date(entry.createdAt) }}<span v-if="!entry.currentFingerprintMatch"> · 旧题目版本</span></summary>
+                    <p class="fine-print">搜索词：{{ entry.query || '尚未发出' }}。网页与文档资料仅作参考，未经过模型整理或事实审定。</p>
+                    <p v-if="entry.error" role="alert">{{ entry.error }}</p>
+                    <p v-if="entry.usage" class="fine-print">工具调用：{{ entry.usage.searchCalls }} 次 Search、{{ entry.usage.fetchCalls }} 次 Fetch；按配置单价估算 {{ entry.usage.estimatedCostCny.toFixed(3) }} 元，实际以服务商账单为准。</p>
+                    <div v-if="entry.sourceErrors?.length" class="retrieval-source-notice"><b>补充抓取未完成的来源</b><ul><li v-for="source in entry.sourceErrors" :key="source.url"><span>{{ source.title || source.url }}</span> · {{ source.error || source.code || '抓取未完成' }}<span v-if="source.upstreamStatus">（HTTP {{ source.upstreamStatus }}）</span><span v-if="entry.sources.some(saved => saved.url === source.url && saved.contentOrigin === 'search')"> · Fetch 未完成，Search 返回的网页正文已保留</span><br><a v-if="safeAiSources([{ id: '', title: '', url: source.url }]).length" :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.url }}</a><span v-else>{{ source.url }}</span></li></ul></div>
+                    <div v-if="entry.skippedSources?.length" class="retrieval-source-notice"><b>未提交抓取的文件</b><ul><li v-for="source in entry.skippedSources" :key="source.url">{{ source.title || source.url }} · {{ source.notice || '非网页文件，未提交 Fetch' }}<br><a v-if="safeAiSources([{ id: '', title: '', url: source.url }]).length" :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.url }}</a><span v-else>{{ source.url }}</span></li></ul></div>
+                    <article v-for="source in entry.sources" :key="source.id + source.url" class="retrieval-source">
+                      <h3><a v-if="retrievalSourceUrl(source)" :href="retrievalSourceUrl(source)" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span v-else>{{ source.title }}</span></h3>
+                      <p class="fine-print">{{ source.originalUrl || source.url }}</p><p class="fine-print">{{ retrievalSourceDescription(source) }}</p><p v-if="source.contentEdited" class="fine-print">正文中的敏感认证信息或控制字符已做安全清理，未由模型改写。</p><pre>{{ source.content }}</pre>
+                    </article>
+                    <section v-if="locallyRecoveredSources(entry).length" class="retrieval-local-recovery" aria-label="从已保存 Search 结果恢复的资料">
+                      <p class="retrieval-source-notice" role="status">已从当时保存的 Search 结果恢复 {{ locallyRecoveredSources(entry).length }} 份资料，未新增网络请求。原检索失败状态保留；这些资料未经模型整理或事实审定。</p>
+                      <article v-for="source in locallyRecoveredSources(entry)" :key="source.id + source.url" class="retrieval-source">
+                        <h3><a v-if="retrievalSourceUrl(source)" :href="retrievalSourceUrl(source)" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span v-else>{{ source.title }}</span></h3>
+                        <p class="fine-print">{{ source.originalUrl || source.url }}</p><p class="fine-print">{{ retrievalSourceDescription(source) }}</p><p v-if="source.contentEdited" class="fine-print">正文中的敏感认证信息或控制字符已做安全清理，未由模型改写。</p><pre>{{ source.content }}</pre>
+                      </article>
+                    </section>
+                  </details>
+                </div>
+              </section>
+              <details v-if="progress.aiNote" class="ai-previous"><summary>此前保存的个性化解析（只读保留）</summary><div class="ai-answer">{{ progress.aiNote }}</div></details>
+              <section class="ai-history-section" aria-label="本题 AI 解析历史">
+                <div class="ai-history-tools"><button class="text-btn history-toggle" type="button" :aria-expanded="aiHistoryOpen" @click="toggleAiHistory">{{ aiHistoryOpen ? '收起本题解析历史 ↑' : `查看本题解析历史${aiHistoryEntries.length ? `（${aiHistoryEntries.length} 条，不会调用模型）` : '（不会调用模型）'} ↓` }}</button><button v-if="aiHistoryOpen" class="text-btn" type="button" :disabled="aiHistoryLoading" @click="loadAiHistory(question.id, false)">刷新历史（不会调用模型）</button></div>
+                <div v-if="aiHistoryOpen" class="ai-history-list">
+                  <p v-if="aiHistoryLoading" role="status">正在读取本题解析历史…</p>
+                  <p v-else-if="aiHistoryError" role="alert">{{ aiHistoryError }}</p>
+                  <p v-else-if="!aiHistoryEntries.length" class="muted">这道题暂时没有可回看的解析记录。每次完整解析都会按题目保存。</p>
+                  <details v-for="entry in aiHistoryEntries" :key="entry.id" class="ai-history-entry">
+                    <summary><span class="version-heading"><b>{{ aiProviderLabel(entry) }}</b><span>{{ aiHistoryStatus(entry) }}</span></span><span class="ai-history-time">{{ entry.createdAt ? `保存于 ${date(entry.createdAt)}` : '生成时间未记录' }}<template v-if="entry.archivedAt"> · 归档时间 {{ date(entry.archivedAt) }}</template></span></summary>
+                    <small>当时选择：{{ entry.userAnswer ? entry.userAnswer.length ? entry.userAnswer.join('、') : '未作答' : '未记录' }} · {{ entry.questionRevision === undefined ? '标准版本未记录' : `标准版本 ${entry.questionRevision}` }}</small>
+                    <p v-if="entry.followup" class="ai-history-followup">追问：{{ entry.followup }}</p>
+                    <pre>{{ entry.text }}</pre>
+                    <p v-if="entry.retrieval" class="fine-print">本次检索：{{ entry.retrieval.searchCalls }} 次 Search、{{ entry.retrieval.fetchCalls }} 次 Fetch，估算 {{ entry.retrieval.estimatedCostCny.toFixed(3) }} 元（不含模型 Token）。</p>
+                    <details v-if="safeAiSources(entry.sources).length" class="ai-history-sources"><summary>查看本次参考来源（{{ safeAiSources(entry.sources).length }}）</summary><ol><li v-for="source in safeAiSources(entry.sources)" :key="source.id + source.url"><a :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span class="fine-print"> · {{ source.id }}</span></li></ol></details>
+                  </details>
+                </div>
+              </section>
             </section>
           </div><aside class="answer-aside"><section v-if="!reviewId && session" class="panel answer-card"><h3>答题卡</h3><p>{{ selectedCount }} / {{ session.questionIds.length }} 已作答</p><div class="answer-grid"><button v-for="(id, i) in session.questionIds" :key="id" :class="{ current: i === session.cursor, answered: session.answers[id]?.length, checked: session.submittedQuestionIds.includes(id), wrong: session.submittedQuestionIds.includes(id) && wasIncorrect(id) }" :aria-label="`第${i + 1}题`" @click="safe(() => store.navigate(i))">{{ i + 1 }}</button></div><div class="card-legend"><span>○ 未答</span><span>● 已答</span><span>◉ 当前</span></div><button v-if="session.status === 'active'" class="btn ghost full" :disabled="store.busy || store.hasAnswerConflicts" @click="finish()">结束并交卷</button></section><section class="aside-tip"><span>一点提示</span><p>{{ examActive ? '遇到不确定的题目，可以先跳过。保持节奏，比在一题上停留更重要。' : '不要只记答案字母。试着说出每个选项成立或不成立的理由。' }}</p><small>{{ question.source }}</small><div v-if="revealed && questionReferences.length" class="question-references"><b>参考依据</b><a v-for="(url, i) in questionReferences" :key="url" :href="url" target="_blank" rel="noopener noreferrer">{{ i + 1 }}. {{ referenceName(url) }} ↗</a></div></section></aside></div>
         </template>
@@ -651,22 +727,18 @@ onUnmounted(() => { disposed = true; clearInterval(timer); window.removeEventLis
 
         <template v-if="page === 'settings'">
           <div class="page-intro"><p class="eyebrow">YOUR STUDY SPACE</p><h1>把工具，调成顺手的样子。</h1><p>连接 AI 解析，管理只属于你的学习记录。</p></div><div class="settings-grid">
-            <section class="panel" aria-label="模型 API 设置">
-              <span class="eyebrow">MODEL API</span><h2>配置 AI 解析。</h2>
-              <p class="muted">使用官方 API 或兼容 OpenAI Chat Completions 的服务。只有主动发起解析时才调用；保存配置不会调用模型。</p>
+            <section class="panel" aria-label="网页检索设置">
+              <span class="eyebrow">SEARCH / FETCH ONLY</span><h2>配置网页资料检索。</h2>
+              <p class="muted">仅使用 DeepSeek 官方 Search／Fetch。Search 查找公开网页，Fetch 读取正文并保存到对应题目，不调用生成模型。</p>
               <form aria-label="API 配置" @submit.prevent="saveApi()">
-                <button type="button" class="btn ghost" :disabled="aiBusy" @click="useDeepSeekDefaults">使用 DeepSeek 官方 API</button>
-                <p class="fine-print">快捷填入官方地址与 deepseek-flash。切换服务后请填写该服务对应的密钥，不会复用其他服务的密钥。</p>
-                <label>API 地址<input v-model="aiDraft.baseUrl" aria-label="API地址" placeholder="https://api.example.com/v1" :disabled="aiBusy"></label>
-                <label>模型名称<input v-model="aiDraft.model" aria-label="模型名称" placeholder="服务方提供的模型 ID" :disabled="aiBusy"></label>
-                <label>API Key<input v-model="aiDraft.apiKey" type="password" autocomplete="off" spellcheck="false" aria-label="API Key" :placeholder="store.ai.configured ? '同一服务留空保留；换服务需新密钥' : '仅保存在本机'" :disabled="aiBusy"></label>
-                <label class="retrieval-toggle"><input v-model="aiDraft.retrievalEnabled" type="checkbox" aria-label="默认联网检索" :disabled="aiBusy || !draftRetrievalAvailable"> 默认开启联网核对来源</label>
-                <p class="fine-print">仅 DeepSeek 官方 API 支持 Search / Fetch。每道题仍可单独开关。每次最多 1 次 Search + 2 次 Fetch，检索约 0.015 元，另计模型 Token 费用。</p>
-                <button type="submit" class="btn ghost" :disabled="aiBusy">{{ apiSaving ? '正在保存…' : '保存模型配置' }}</button>
+                <p class="fine-print">服务地址固定为 https://api.deepseek.com/v1/tools/search 与 /fetch，无法切换为生成模型。</p>
+                <label>DeepSeek API Key<input v-model="aiDraft.apiKey" type="password" autocomplete="off" spellcheck="false" aria-label="API Key" :placeholder="store.ai.configured ? '留空保留本机已保存密钥' : '仅保存在本机'" :disabled="aiBusy"></label>
+                <p class="fine-print">每题版本最多 1 次 Search 与 2 次 Fetch，工具可能计费，实际以服务商账单为准。保存配置、浏览题目和读取已存资料不会发起检索。</p>
+                <button type="submit" class="btn ghost" :disabled="aiBusy">{{ apiSaving ? '正在保存…' : '保存检索配置' }}</button>
                 <button v-if="store.ai.configured" type="button" class="btn ghost" :disabled="aiBusy" @click="saveApi(true)">清除本机 API 密钥</button>
-                <p class="fine-print">密钥不返回到页面，也不包含在学习记录导出中。解析只发送当前题目、当前作答和最多 1500 字追问，不上传笔记或全部历史。API 费用由所选服务计算。</p>
+                <p class="fine-print">密钥不返回到页面，也不包含在学习记录导出中。检索词只取题干、科目与知识点，不发送个人作答、笔记或学习历史。</p>
               </form>
-            </section><section class="panel"><span class="eyebrow">YOURS TO KEEP</span><h2>让学习记录，有一份备份。</h2><p class="muted">错题、收藏、笔记、AI 解析和答题记录都保存在本机。导出后可在本平台重新导入。</p><div class="backup-actions"><button class="btn primary" @click="exportData">导出学习记录 ↓</button><button class="btn ghost" @click="importInput?.click()">导入备份 ↑</button><input ref="importInput" type="file" accept=".json,application/json" hidden @change="importData"></div><p class="fine-print">导入只补充缺失的题目进度与答题记录，现有内容保留。不同的旧笔记与解析会存入题目历史，导入前另存快照。API Key 不包含在备份中。</p><div class="about-bank"><h3>当前题库</h3><p>{{ availableBank.length }} 道可用题目<br>{{ bankSingleCount }} 单选 · {{ availableBank.length - bankSingleCount }} 多选 · {{ availableCategories.length }} 个方向</p><small>题目由你自行提供；请确认有权使用，并核对答案与解析。</small><button class="btn ghost" @click="go('bank')">浏览与管理题库 →</button></div></section></div>
+            </section><section class="panel"><span class="eyebrow">YOURS TO KEEP</span><h2>让学习记录，有一份备份。</h2><p class="muted">错题、收藏、笔记、AI 解析和答题记录都保存在本机。导出后可在本平台重新导入。</p><div class="backup-actions"><button class="btn primary" @click="exportData">导出学习记录 ↓</button><button class="btn ghost" @click="importInput?.click()">导入备份 ↑</button><input ref="importInput" type="file" accept=".json,application/json" hidden @change="importData"></div><p class="fine-print">导入只补充缺失的题目进度与答题记录，现有内容保留。不同的旧笔记与解析会存入题目历史，导入前另存快照。API Key 不包含在备份中。网页原文另存在本机资料目录，当前学习记录导出不包含网页资料。</p><div class="about-bank"><h3>当前题库</h3><p>{{ availableBank.length }} 道可用题目<br>{{ bankSingleCount }} 单选 · {{ availableBank.length - bankSingleCount }} 多选 · {{ availableCategories.length }} 个方向</p><small>题目由你自行提供；请确认有权使用，并核对答案与解析。</small><button class="btn ghost" @click="go('bank')">浏览与管理题库 →</button></div></section></div>
         </template>
         <footer class="page-footer"><span>备考 · 个人刷题平台</span><span>日日积累，久久为功。</span></footer>
       </div>
@@ -675,8 +747,10 @@ onUnmounted(() => { disposed = true; clearInterval(timer); window.removeEventLis
 </template>
 
 <style scoped>
+.retrieval-history-section{margin-top:24px;border-top:1px solid #ddd;padding-top:20px}.retrieval-history-entry{border:1px solid #c8c8c8;border-radius:8px;padding:18px;margin-top:14px}.retrieval-history-entry>summary{cursor:pointer;line-height:1.8}.retrieval-source{margin-top:20px;border-top:1px solid #ddd;padding-top:12px}.retrieval-source h3{line-height:1.7}.retrieval-source a{text-decoration:underline;overflow-wrap:anywhere}.retrieval-source pre{font:15px/1.9 "Microsoft YaHei","微软雅黑",sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-height:520px;overflow:auto;background:#f6f6f6;padding:14px}.retrieval-source .fine-print{overflow-wrap:anywhere}.retrieval-source-notice{font-size:14px;line-height:1.8;margin-top:14px;overflow-wrap:anywhere}.retrieval-source-notice a{text-decoration:underline}.retrieval-source-notice ul{padding-left:20px}
 .question-references{display:grid;gap:10px;margin-top:20px;overflow-wrap:anywhere;font-size:15px}.question-references b{color:var(--study-text)}.question-references a{border-bottom:1px solid #aaa;padding-bottom:4px;text-decoration:underline;text-underline-offset:4px}.question-references a:hover{background:#ddd;color:#111}
 .standard-update{border:2px solid #555;border-radius:8px;background:#eee;color:var(--study-text);padding:14px 16px;margin:0 0 20px;font-size:16px;line-height:1.9}.standard-update summary{cursor:pointer;text-decoration:underline;text-underline-offset:4px;font-weight:600;min-height:40px;padding:6px 0}.standard-update summary:hover{background:#ddd}.standard-update p{margin-bottom:0}.draft-status{font-size:15px;color:var(--study-text-secondary);margin:0 0 12px}.integrity-warning{border:2px solid #555;border-radius:8px;padding:16px 18px;background:#eee;color:var(--study-text);overflow-wrap:anywhere}.answer-conflict{margin-bottom:20px}.answer-conflict p{margin:8px 0 14px}.saved-comparison{padding:18px;background:#f2f2f2;border-left:4px solid #555;margin:18px 0}.saved-comparison h3{font-size:18px;margin-bottom:8px}.saved-comparison p{margin-bottom:12px}.saved-comparison dl{margin:0}.saved-comparison dt{font-weight:bold;margin-top:8px}.saved-comparison dd{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}.note-actions{display:flex;gap:14px;flex-wrap:wrap;justify-content:flex-end;align-items:center}.text-history{margin-top:24px;border-top:1px solid #ddd;padding-top:20px}.history-toggle{margin-bottom:16px}.text-version{border:1px solid #ddd;border-radius:8px;padding:18px;margin-top:14px}.version-heading{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:16px}.text-version small{color:var(--study-text-secondary)}.text-version pre{font:16px/1.9 "Microsoft YaHei","微软雅黑",sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;background:#f6f6f6;padding:12px}.text-version .btn{min-height:42px}
+.ai-history-section{margin-top:24px;border-top:1px solid #ddd;padding-top:20px}.ai-history-tools{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px}.ai-history-list{margin-top:8px}.ai-history-entry{border:1px solid #c8c8c8;border-radius:8px;padding:18px;margin-top:14px;background:#fff}.ai-history-entry>summary{cursor:pointer;list-style-position:inside}.ai-history-entry>summary .version-heading{display:inline-flex;vertical-align:top;width:calc(100% - 24px);flex-wrap:wrap;gap:8px}.ai-history-time{display:block;color:var(--study-text-secondary);font-size:13px;line-height:1.7;margin-top:7px}.ai-history-entry small{display:block;color:var(--study-text-secondary);margin-top:7px}.ai-history-entry pre{font:16px/1.9 "Microsoft YaHei","微软雅黑",sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;background:#f6f6f6;padding:12px;margin:14px 0}.ai-history-followup{border-left:3px solid #777;padding-left:10px;margin:13px 0;color:var(--study-text-secondary);white-space:pre-wrap;overflow-wrap:anywhere}.ai-history-sources{border-top:1px solid #ddd;padding-top:12px;margin-top:14px}.ai-history-sources summary{cursor:pointer}.ai-history-sources ol{margin:10px 0 0 20px}.ai-history-sources a{text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}
 .analysis-recovery{display:flex;align-items:center;justify-content:space-between;gap:18px;border:1px solid #c8c8c8;background:#f5f5f5;border-radius:10px;padding:18px 22px;margin-bottom:22px}
 .analysis-recovery strong{font-size:16px}.analysis-recovery p,.analysis-safeguards p{font-size:15px;line-height:1.85;margin:8px 0;color:var(--study-text)}
 .recovery-actions{display:flex;flex-wrap:wrap;gap:10px;flex-shrink:0}.analysis-safeguards{border:1px solid #d7d7d7;border-radius:8px;padding:18px;margin-bottom:22px;background:#f7f7f7}

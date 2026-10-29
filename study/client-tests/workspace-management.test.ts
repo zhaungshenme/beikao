@@ -137,16 +137,16 @@ describe('题库和记录管理与真实 workspace/store 的整合', () => {
     const store = await mount();
     expect(store.ai.webProvider).toBe('zhipu');
     expect(store.ai.webUrl).toBe('https://chatglm.cn/main/alltoolsdetail?lang=zh');
-    expect(visibleText(host)).toContain('API 未配置');
+    expect(visibleText(host)).toContain('检索未配置');
     await click(button(host, '继续上次答题'));
     expect(descendants(host).some(node => node.tag === 'a' && node.props.href === store.ai.webUrl)).toBe(false);
     await click(button(host, '学习设置'));
-    expect(descendants(host).some(node => node.props['aria-label'] === '模型 API 设置')).toBe(true);
+    expect(descendants(host).some(node => node.props['aria-label'] === '网页检索设置')).toBe(true);
     expect(visibleText(host)).not.toContain('连接此页');
     expect(descendants(host).some(node => node.props['aria-label'] === '默认回复渠道')).toBe(false);
     for (const label of ['API地址', '模型名称']) {
       const input = descendants(host).find(node => node.tag === 'input' && node.props['aria-label'] === label);
-      expect(input?.value).toBe('');
+      expect(input).toBeUndefined();
     }
   });
 
@@ -156,7 +156,7 @@ describe('题库和记录管理与真实 workspace/store 的整合', () => {
     vi.mocked(api.getBridgeStatus).mockResolvedValue({ connected: true, provider: 'zhipu', version: '1.7.0', lastSeenAt: time,
       worker: { connected: true, provider: 'zhipu', version: '1.7.0', state: 'idle', jobId: null, message: '', lastSeenAt: time } });
     await mount(); await click(button(host, '学习设置')); await settle();
-    expect(descendants(host).some(node => node.props['aria-label'] === '模型 API 设置')).toBe(true);
+    expect(descendants(host).some(node => node.props['aria-label'] === '网页检索设置')).toBe(true);
     expect(visibleText(host)).not.toContain('网页已连接');
     await click(button(host, '题库管理'));
     expect(api.getPreanalysisSettings).not.toHaveBeenCalled();

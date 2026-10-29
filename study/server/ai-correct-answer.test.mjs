@@ -93,17 +93,15 @@ test('a correct multiple-choice set in different order receives the same underst
   verifyGradesUnchanged(before, ok(await app.request('/bootstrap')), id);
 });
 
-test('the optional API also accepts a correct answer and uses the shared prompt without changing its score', async t => {
-  let sent;
-  const app = await harness(t, { fetchImpl: async (_url, init) => {
-    sent = JSON.parse(init.body);
-    return { ok: true, json: async () => ({ choices: [{ message: { content: 'API核验思路与关键依据' } }] }) };
-  } });
+test('retired generation cannot change a correct answer, saved grade or explanation', async t => {
+  let calls = 0;
+  const app = await harness(t, { fetchImpl: async () => { calls++; throw new Error('Model generation is forbidden'); } });
   const id = bank[0].id;
   const before = await completedCorrectSession(app, id, ['A']);
-  ok(await app.request('/ai/settings', { baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey: 'test-only-correct-answer-key' }, 'PUT'));
-  const result = ok(await app.request('/ai/explain', { questionId: id, answer: ['A'] }));
-  assert.equal(result.text, 'API核验思路与关键依据');
-  verifyCorrectLearningPrompt(sent.messages.find(message => message.role === 'user').content);
+  const response = await app.request('/ai/explain', { questionId: id, answer: ['A'] });
+  assert.equal(response.status, 410);
+  assert.equal(response.body.modelRequested, false);
   verifyGradesUnchanged(before, ok(await app.request('/bootstrap')), id);
+  assert.equal(calls, 0);
 });
+

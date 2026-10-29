@@ -1,4 +1,4 @@
-import type { AiExplanation, AiSettings, BridgeJob, BridgeOverview, BridgeStatus, CheckResponse, FinishResponse, PreanalysisSettings, PreanalysisSettingsChanges, PreanalysisStatus, PreparedExplanation, ProgressChanges, ProgressExpected, QuestionAnswerChanges, QuestionAnswerHistory, QuestionAnswerResponse, QuestionHistoryEntry, QuestionProgress, QuestionRecordsBatchItem, QuestionRecordsBatchResponse, SessionOptions, SessionRecordsBatchItem, SessionRecordsBatchResponse, StudyBootstrap, StudyRequestError, StudySession, WebProvider, WrongMasteryBatchItem, WrongMasteryBatchResponse, WrongRecordsBatchItem, WrongRecordsBatchResponse } from './types';
+import type { AiExplanation, AiHistoryEntry, AiSettings, BridgeJob, BridgeOverview, BridgeStatus, CheckResponse, FinishResponse, PreanalysisSettings, PreanalysisSettingsChanges, PreanalysisStatus, PreparedExplanation, ProgressChanges, ProgressExpected, QuestionAnswerChanges, QuestionAnswerHistory, QuestionAnswerResponse, QuestionHistoryEntry, QuestionProgress, QuestionRecordsBatchItem, QuestionRecordsBatchResponse, RetrievalArchiveEntry, RetrievalReply, SessionOptions, SessionRecordsBatchItem, SessionRecordsBatchResponse, StudyBootstrap, StudyRequestError, StudySession, WebProvider, WrongMasteryBatchItem, WrongMasteryBatchResponse, WrongRecordsBatchItem, WrongRecordsBatchResponse } from './types';
 
 /** 独立个人学习服务使用同源 API；不复用管理端的令牌和加密协议。 */
 async function studyRequest<T>(path: string, method = 'GET', body?: unknown, timeout = 20000): Promise<T> {
@@ -21,6 +21,7 @@ async function studyRequest<T>(path: string, method = 'GET', body?: unknown, tim
       if (typeof payload.code === 'string') error.code = payload.code;
       if (payload.current !== undefined) error.current = payload.current;
       if (typeof payload.historyId === 'string') error.historyId = payload.historyId;
+      if (typeof payload.aiHistoryId === 'string') error.aiHistoryId = payload.aiHistoryId;
       throw error;
     }
     return payload as T;
@@ -46,9 +47,13 @@ export const updateWrongMasteryBatch = (data: { mastered: boolean; items: WrongM
 export const updateQuestionRecordsBatch = (data: { removed: boolean; items: QuestionRecordsBatchItem[] }) => studyRequest<QuestionRecordsBatchResponse>('/question-records/batch', 'POST', data);
 export const updateSessionRecordsBatch = (data: { removed: boolean; items: SessionRecordsBatchItem[] }) => studyRequest<SessionRecordsBatchResponse>('/session-records/batch', 'POST', data);
 export const loadQuestionHistory = (id: string) => studyRequest<{ entries: QuestionHistoryEntry[] }>(`/questions/${encodeURIComponent(id)}/history`);
+export const loadAiHistory = (id: string) => studyRequest<{ entries: AiHistoryEntry[] }>(`/questions/${encodeURIComponent(id)}/ai-history`);
+export const loadRetrievalHistory = (id: string) => studyRequest<{ entries: RetrievalArchiveEntry[] }>(`/questions/${encodeURIComponent(id)}/retrieval-history`);
+export const retrieveStudyQuestion = (data: { questionId: string; expectedQuestionRevision: number; requestId: string }) => studyRequest<RetrievalReply>('/ai/retrieve', 'POST', data, 60000);
 export const restoreQuestionHistory = (id: string, data: { historyId: string; expected: string }) => studyRequest<QuestionProgress>(`/questions/${encodeURIComponent(id)}/restore`, 'POST', data);
-export const saveAiSettings = (data: { baseUrl?: string; model?: string; apiKey?: string; clearApiKey?: boolean; retrievalEnabled?: boolean; webUrl?: string; webProvider?: WebProvider }) => studyRequest<AiSettings>('/ai/settings', 'PUT', data);
-export const explainStudyQuestion = (data: { questionId: string; answer?: string[]; question?: string; expectedQuestionRevision?: number; retrievalEnabled: boolean }) => studyRequest<AiExplanation>('/ai/explain', 'POST', data, 120000);
+export const saveAiSettings = (data: { baseUrl?: 'https://api.deepseek.com/v1'; apiKey?: string; clearApiKey?: boolean }) => studyRequest<AiSettings>('/ai/settings', 'PUT', data);
+/** Kept only to fail old client integrations locally; generation has no HTTP path. */
+export const explainStudyQuestion = (_data: { questionId: string; answer?: string[]; question?: string; expectedQuestionRevision?: number; retrievalEnabled: boolean }): Promise<AiExplanation> => Promise.reject(new Error('生成模型入口已关闭，请使用 Search／Fetch 网页检索。'));
 export const exportStudyData = () => studyRequest<unknown>('/export');
 export const getBridgeStatus = (provider?: WebProvider) => studyRequest<BridgeStatus>(`/bridge/status${provider ? `?provider=${encodeURIComponent(provider)}` : ''}`, 'GET', undefined, 8000);
 export const createBridgeJob = (data: { questionId: string; answer?: string[]; question?: string; requestId?: string; provider?: WebProvider; expectedQuestionRevision?: number }) => studyRequest<BridgeJob>('/bridge/jobs', 'POST', data, 8000);

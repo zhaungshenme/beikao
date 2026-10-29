@@ -56,7 +56,25 @@ export interface AnswerHistoryEntry {
 export interface QuestionAnswerChanges { answer: string[]; explanation: string; note: string; expectedRevision: number }
 export interface QuestionAnswerResponse { question: StudyQuestion; sessions?: StudySession[] }
 export interface QuestionAnswerHistory extends QuestionAnswerResponse { entries: AnswerHistoryEntry[] }
-export interface StudyRequestError extends Error { status?: number; code?: string; current?: unknown; historyId?: string }
+export interface StudyRequestError extends Error { status?: number; code?: string; current?: unknown; historyId?: string; aiHistoryId?: string }
+export interface AiHistoryEntry {
+  id: string;
+  questionId: string;
+  text: string;
+  createdAt?: string;
+  archivedAt?: string;
+  provider: string;
+  transport: 'api' | 'web' | 'legacy';
+  source: string;
+  status: 'current' | 'conflict' | 'legacy';
+  model?: string;
+  followup?: string;
+  userAnswer?: string[];
+  questionRevision?: number;
+  questionFingerprint?: string;
+  retrieval?: AiRetrieval;
+  sources?: AiSource[];
+}
 export interface AnswerConflict { questionId: string; localAnswer: string[]; serverAnswer?: string[]; message: string; code?: string }
 export interface RecordMetadata { removed: boolean; revision: number }
 export interface QuestionRecordsBatchItem { questionId: string; expected: RecordMetadata }
@@ -83,6 +101,7 @@ export interface StudySession {
 export type WebProvider = 'zhipu' | 'deepseek';
 export type ReplyChannel = 'zhipu-web' | 'deepseek-web' | 'api';
 export interface AiSettings {
+  mode?: 'web-retrieval-only';
   configured: boolean;
   baseUrl: string;
   model: string;
@@ -94,6 +113,53 @@ export interface AiSettings {
 export interface AiSource { id: string; title: string; url: string }
 export interface AiRetrieval { searchCalls: number; fetchCalls: number; estimatedCostCny: number }
 export interface AiExplanation { text: string; sources?: AiSource[]; retrieval?: AiRetrieval }
+export interface RetrievalSource extends AiSource {
+  content: string;
+  contentOrigin?: 'search' | 'fetch';
+  contentEdited?: boolean;
+  contentTruncated?: false;
+  sourceKind?: 'web-page' | 'document-extract';
+  documentType?: 'pdf';
+  fetchSkipped?: boolean;
+  resultIndex?: number;
+  originalUrl?: string;
+  originalFragment?: string;
+  contentPolicy?: string;
+}
+export interface RetrievalLocalRecovery {
+  id: string;
+  kind: 'saved-search-text';
+  parentArchiveId: string;
+  parentArchiveSha256: string;
+  networkRequested: false;
+  modelRequested: false;
+  sourceCount: number;
+  sources: RetrievalSource[];
+}
+export interface RetrievalArchiveEntry {
+  id?: string;
+  requestId: string;
+  questionId: string;
+  questionRevision: number;
+  questionFingerprint: string;
+  currentFingerprintMatch?: boolean;
+  status: 'running' | 'completed' | 'failed' | 'unknown';
+  modelRequested?: false;
+  partial?: boolean;
+  query?: string;
+  createdAt: string;
+  updatedAt?: string;
+  sources: RetrievalSource[];
+  contentPolicy?: string;
+  localRecovery?: RetrievalLocalRecovery;
+  localRecoverySourceCount?: number;
+  referenceAvailable?: boolean;
+  sourceErrors?: Array<{ url: string; title?: string; code?: string; error?: string; upstreamStatus?: number; tool?: string }>;
+  skippedSources?: Array<{ url: string; title?: string; reason?: string; notice?: string }>;
+  usage?: AiRetrieval;
+  error?: string;
+}
+export interface RetrievalReply { cached: boolean; entry: RetrievalArchiveEntry }
 export interface StudyBootstrap {
   questions: StudyQuestion[];
   questionRecords?: Record<string, RecordMetadata>;
@@ -149,7 +215,7 @@ export interface BridgeStatus {
     version?: string | null;
   };
 }
-export interface BridgeJob { id: string; provider?: string; status: 'queued' | 'sent' | 'running' | 'streaming' | 'completed' | 'failed'; createdAt?: string; updatedAt?: string; lastProgressAt?: string; questionId?: string; prompt?: string; text?: string; error?: string; failureCode?: string; sequence?: number; requestId?: string; kind?: 'preanalysis' | 'personalized'; userAnswer?: string[]; questionFingerprint?: string; questionRevision?: number }
+export interface BridgeJob { id: string; provider?: string; status: 'queued' | 'sent' | 'running' | 'streaming' | 'completed' | 'failed'; createdAt?: string; updatedAt?: string; lastProgressAt?: string; questionId?: string; prompt?: string; text?: string; error?: string; failureCode?: string; sequence?: number; requestId?: string; kind?: 'preanalysis' | 'personalized'; userAnswer?: string[]; followup?: string; questionFingerprint?: string; questionRevision?: number; aiHistoryId?: string }
 export interface BridgeOverview {
   provider?: WebProvider;
   activeJob: BridgeJob | null;

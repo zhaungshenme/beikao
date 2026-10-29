@@ -486,34 +486,34 @@ test('a failed import rolls back both progress and sessions while allowing the s
   assert.deepEqual(restarted.sessions, imported.sessions);
 });
 
-test('failed AI settings persistence cannot change the model or key held in memory', async (t) => {
+test('failed retrieval settings persistence cannot change the credentials held in memory', async (t) => {
   const app = await harness(t);
-  success(await app.request('/ai/settings', { method: 'PUT', body: { model: 'saved-model', clearApiKey: true } }));
+  success(await app.request('/ai/settings', { method: 'PUT', body: { baseUrl: 'https://api.deepseek.com/v1', clearApiKey: true } }));
   const before = success(await app.request('/bootstrap')).ai;
   const restore = await blockJsonWrite(app, 'ai-settings.json');
   try {
-    assert.equal((await app.request('/ai/settings', { method: 'PUT', body: { model: 'unsaved-model', apiKey: 'test-key' } })).status, 500);
+    assert.equal((await app.request('/ai/settings', { method: 'PUT', body: { apiKey: 'test-key' } })).status, 500);
     assert.deepEqual(success(await app.request('/bootstrap')).ai, before);
   } finally { await restore(); }
-  success(await app.request('/ai/settings', { method: 'PUT', body: { model: 'retry-model' } }));
+  success(await app.request('/ai/settings', { method: 'PUT', body: { apiKey: 'retry-test-key' } }));
   await app.restart();
-  assert.equal(success(await app.request('/bootstrap')).ai.model, 'retry-model');
+  assert.equal(success(await app.request('/bootstrap')).ai.configured, true);
+  assert.equal(success(await app.request('/bootstrap')).ai.model, '');
 });
 
-test('failed API explanation persistence keeps the previous note and its retry can be saved', async (t) => {
-  const app = await harness(t, { fetchImpl: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: '新模型解析' } }] }) }) });
+test('retired generation preserves the saved explanation and makes zero network calls', async (t) => {
+  let calls = 0;
+  const app = await harness(t, { fetchImpl: async () => { calls++; throw new Error('Generation forbidden'); } });
   const questionId = 'fixture-single';
-  success(await app.request('/ai/settings', { method: 'PUT', body: { baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey: 'test-key' } }));
   success(await app.request(`/questions/${questionId}`, { method: 'PATCH', body: { aiNote: '原解析' } }));
-  const before = success(await app.request('/bootstrap'));
-  const restore = await blockJsonWrite(app);
-  try {
-    assert.equal((await app.request('/ai/explain', { method: 'POST', body: { questionId, answer: ['A'] } })).status, 500);
-    assert.deepEqual(success(await app.request('/bootstrap')).progress, before.progress);
-  } finally { await restore(); }
-  assert.equal(success(await app.request('/ai/explain', { method: 'POST', body: { questionId, answer: ['A'] } })).text, '新模型解析');
-  await app.restart();
-  assert.equal(success(await app.request('/bootstrap')).progress[questionId].aiNote, '新模型解析');
+  const before = success(await app.request('/export'));
+  const response = await app.request('/ai/explain', { method: 'POST', body: { questionId, answer: ['A'] } });
+  assert.equal(response.status, 410);
+  assert.equal(response.body.modelRequested, false);
+  const after = success(await app.request('/export'));
+  delete before.exportedAt; delete after.exportedAt;
+  assert.deepEqual(after, before);
+  assert.equal(calls, 0);
 });
 
 test('unknown questions and filters with no matches return controlled responses without phantom progress', async (t) => {
@@ -616,15 +616,15 @@ test('invalid backup sessions are rejected before any existing study data change
   }
 });
 
-test('AI configuration never echoes its API key and missing configuration returns 503', async (t) => {
+test('retrieval configuration never echoes its API key and generation remains retired', async (t) => {
   let providerCalls = 0;
   const app = await harness(t, { fetchImpl: async () => { providerCalls += 1; throw new Error('unexpected provider request'); } });
   const unavailable = await app.request('/ai/explain', { method: 'POST', body: { questionId: 'fixture-single' } });
-  assert.equal(unavailable.status, 503);
+  assert.equal(unavailable.status, 410);
   assert.equal(providerCalls, 0);
   const apiKey = 'test-secret-never-echo-4f72895a';
   const saved = await app.request('/ai/settings', {
-    method: 'PUT', body: { baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey, webUrl: 'https://example.invalid/chat' },
+    method: 'PUT', body: { baseUrl: 'https://api.deepseek.com/v1', apiKey },
   });
   success(saved);
   assert.ok(!saved.text.includes(apiKey));

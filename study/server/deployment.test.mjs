@@ -120,6 +120,30 @@ async function waitForService(port) {
   throw new Error('mock service did not start');
 }
 
+async function launcherDiagnostics(directory, dataDirectory, result) {
+  // A failed assertion otherwise loses these synthetic service logs when the
+  // fixture cleanup runs. Never inspect the real project's service directory.
+  const logs = await Promise.all(['service.stderr.log', 'service.stdout.log'].map(async name => {
+    try { return `${name}:\n${await fs.readFile(path.join(directory, dataDirectory, name), 'utf8')}`; }
+    catch (error) { return `${name}: (${error.code ?? error.name})`; }
+  }));
+  let ownershipProbe = '';
+  if (process.platform === 'win32' && result.status !== 0) {
+    try {
+      const info = JSON.parse((await fs.readFile(path.join(directory, dataDirectory, 'service.json'), 'utf8')).replace(/^\uFEFF/, ''));
+      if (Number.isSafeInteger(info.pid) && info.pid > 0 && Number.isSafeInteger(info.port) && info.port > 0) {
+        const shell = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe') : 'powershell.exe';
+        // Inspect only the PID/port written by this isolated mock service. Fail
+        // visibly if Windows denies the queries used by launcher ownership.
+        const source = `$out = [ordered]@{}; try { $out.listener = @(Get-NetTCPConnection -State Listen -LocalPort ${info.port} -ErrorAction Stop | Select-Object LocalPort,OwningProcess) } catch { $out.listenerError = $_.Exception.Message; $out.listenerErrorId = $_.FullyQualifiedErrorId }; try { $out.process = Get-CimInstance Win32_Process -Filter 'ProcessId = ${info.pid}' -ErrorAction Stop | Select-Object ProcessId,CreationDate,CommandLine } catch { $out.processError = $_.Exception.Message; $out.processErrorId = $_.FullyQualifiedErrorId }; $out | ConvertTo-Json -Depth 4 -Compress`;
+        const probe = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 10000, windowsHide: true });
+        ownershipProbe = `fixture ownership probe:\n${probe.stdout ?? ''}\n${probe.stderr ?? ''}\n${probe.error?.message ?? ''}`;
+      }
+    } catch (error) { ownershipProbe = `fixture ownership probe: (${error.code ?? error.name})`; }
+  }
+  return [result.stderr, result.stdout, result.error?.message, `status=${result.status}; signal=${result.signal}`, ...logs, ownershipProbe].filter(Boolean).join('\n');
+}
+
 test('relocated clean checkout creates only configured data and retires web-helper installation', async t => {
   const directory = await fixture(t);
   const port = await freePort();
@@ -163,9 +187,10 @@ test('Windows launcher uses configured directory and refuses stale process ident
     await fs.rm(directory, { recursive: true, force: true });
   });
   const started = run('Start-Study.ps1');
-  assert.equal(started.status, 0, started.stderr + started.stdout);
+  assert.equal(started.status, 0, await launcherDiagnostics(directory, 'runtime data', started));
   await waitForService(port);
-  assert.equal(run('Start-Study.ps1').status, 0);
+  const reused = run('Start-Study.ps1');
+  assert.equal(reused.status, 0, await launcherDiagnostics(directory, 'runtime data', reused));
   const serviceFile = path.join(directory, 'runtime data/service.json');
   const metadata = JSON.parse((await fs.readFile(serviceFile, 'utf8')).replace(/^\uFEFF/, ''));
   await fs.writeFile(serviceFile, JSON.stringify({ ...metadata, processStartedAt: '1970-01-01T00:00:00.000Z' }));
@@ -173,7 +198,7 @@ test('Windows launcher uses configured directory and refuses stale process ident
   assert.equal((await request(port, '/study/')).status, 200, 'stale metadata must not stop even a matching script');
   await fs.writeFile(serviceFile, JSON.stringify(metadata));
   const stopped = run('Stop-Study.ps1');
-  assert.equal(stopped.status, 0, stopped.stderr + stopped.stdout);
+  assert.equal(stopped.status, 0, await launcherDiagnostics(directory, 'runtime data', stopped));
   const end = JSON.parse((await fs.readFile(serviceFile, 'utf8')).replace(/^\uFEFF/, ''));
   assert.equal(end.running, false);
 });
@@ -230,7 +255,7 @@ test('double-click commands work from another directory, reuse the service, and 
   assert.equal(missingNode.status, 1, missingNode.stderr + missingNode.stdout);
   assert.equal(await fs.stat(serviceFile).catch(() => null), null);
   const started = run('启动备考.cmd');
-  assert.equal(started.status, 0, started.stderr + started.stdout);
+  assert.equal(started.status, 0, await launcherDiagnostics(directory, 'runtime 中文 data', started));
   assert.equal((await request(port, '/study/')).status, 200);
   const metadata = JSON.parse((await fs.readFile(serviceFile, 'utf8')).replace(/^\uFEFF/, ''));
   assert.equal(metadata.port, port);
@@ -239,11 +264,11 @@ test('double-click commands work from another directory, reuse the service, and 
   assert.ok(metadata.pid > 0);
   assert.equal(await fs.stat(path.join(directory, 'study/storage')).catch(() => null), null);
   const reused = run('启动备考.cmd');
-  assert.equal(reused.status, 0, reused.stderr + reused.stdout);
+  assert.equal(reused.status, 0, await launcherDiagnostics(directory, 'runtime 中文 data', reused));
   const repeated = JSON.parse((await fs.readFile(serviceFile, 'utf8')).replace(/^\uFEFF/, ''));
   assert.equal(repeated.pid, metadata.pid, 'double-clicking again must reuse the same service');
   const stopped = run('停止备考.cmd');
-  assert.equal(stopped.status, 0, stopped.stderr + stopped.stdout);
+  assert.equal(stopped.status, 0, await launcherDiagnostics(directory, 'runtime 中文 data', stopped));
   const ended = JSON.parse((await fs.readFile(serviceFile, 'utf8')).replace(/^\uFEFF/, ''));
   assert.equal(ended.running, false);
   await assert.rejects(request(port, '/study/'));

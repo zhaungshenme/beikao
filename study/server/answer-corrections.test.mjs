@@ -296,27 +296,20 @@ test('older bridge journals without a standard revision remain readable as revis
   assert.equal(ok(await app.request('/questions/single/history')).entries.find(entry => entry.id === final.historyId).text, final.text);
 });
 
-test('a delayed API explanation under an older answer is retained as a candidate and returns a conflict', async t => {
-  let started, release;
-  const requestStarted = new Promise(resolve => { started = resolve; });
-  const responseGate = new Promise(resolve => { release = resolve; });
-  const app = await harness(t, { fetchImpl: async () => {
-    started();
-    await responseGate;
-    return { ok: true, json: async () => ({ choices: [{ message: { content: 'API基于旧标准的完整回复' } }] }) };
-  } });
-  ok(await app.request('/ai/settings', { baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey: 'test-only-answer-revision-key' }, 'PUT'));
+test('retired API generation cannot overwrite existing explanation after an answer correction', async t => {
+  let calls = 0;
+  const app = await harness(t, { fetchImpl: async () => { calls++; throw new Error('Model generation forbidden'); } });
   ok(await app.request('/questions/single', { aiNote: '已经保存的解析', expected: { aiNote: '' } }, 'PATCH'));
-  const pending = app.request('/ai/explain', { questionId: 'single' });
-  await requestStarted;
   ok(await correction(app));
-  release();
-  const conflict = await pending;
-  assert.equal(conflict.status, 409);
-  assert.equal(conflict.body.code, 'WRITE_CONFLICT');
-  assert.match(conflict.body.error, /标准答案已更新/);
-  assert.equal(ok(await app.request('/bootstrap')).progress.single.aiNote, '已经保存的解析');
-  assert.equal(ok(await app.request('/questions/single/history')).entries.find(entry => entry.id === conflict.body.historyId).text, 'API基于旧标准的完整回复');
-  await app.restart();
-  assert.equal(ok(await app.request('/questions/single/history')).entries.find(entry => entry.id === conflict.body.historyId).source, 'answer-standard-conflict');
+  const before = ok(await app.request('/export'));
+  for (const expectedQuestionRevision of [0, 1]) {
+    const retired = await app.request('/ai/explain', { questionId: 'single', expectedQuestionRevision });
+    assert.equal(retired.status, 410);
+    assert.equal(retired.body.modelRequested, false);
+  }
+  const after = ok(await app.request('/export'));
+  delete before.exportedAt; delete after.exportedAt;
+  assert.deepEqual(after, before);
+  assert.equal(calls, 0);
 });
+

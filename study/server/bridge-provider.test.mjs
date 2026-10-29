@@ -399,53 +399,33 @@ test('public web configuration is fixed to zhipu while saved optional API config
   const migrated = (await app.request('/bootstrap')).ai;
   assert.equal(migrated.webUrl, initial.webUrl);
   assert.equal(migrated.baseUrl, 'https://example.invalid/v1');
-  assert.equal(migrated.model, 'saved-api-model');
-  assert.equal(migrated.configured, true);
+  assert.equal(migrated.model, '');
+  assert.equal(migrated.configured, false);
   assert.equal(migrated.apiKey, undefined);
   assert.equal(await app.saved('ai-settings.json'), legacyConfig, 'reading a migrated profile must not rewrite API settings');
 });
 
-test('an optional API with any missing required setting returns 503 before invoking fetch', async t => {
-  const originalKey = process.env.STUDY_AI_API_KEY;
-  delete process.env.STUDY_AI_API_KEY;
-  t.after(() => { if (originalKey === undefined) delete process.env.STUDY_AI_API_KEY; else process.env.STUDY_AI_API_KEY = originalKey; });
-  const fetchCalls = [];
-  const app = await harness(t, { fetchImpl: async (...args) => {
-    fetchCalls.push(args);
-    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '完整配置才可请求的测试解析' } }] }) };
-  } });
+test('retired generation stays disabled for complete, incomplete and legacy provider configurations', async t => {
+  let calls = 0;
+  const app = await harness(t, { fetchImpl: async () => { calls++; throw new Error('No provider request'); } });
   const learning = await app.saved('learning-state.json');
-  const complete = { baseUrl: 'https://example.invalid/v1', model: 'custom-model', apiKey: 'test-key' };
-  const incomplete = [
-    {},
-    { apiKey: complete.apiKey },
-    { model: complete.model, apiKey: complete.apiKey },
-    { baseUrl: complete.baseUrl, apiKey: complete.apiKey },
-    { baseUrl: complete.baseUrl, model: complete.model },
-  ];
-  for (const settings of incomplete) {
+  for (const settings of [{}, { apiKey: 'test-key' }, { baseUrl: 'https://example.invalid/v1', model: 'custom-model', apiKey: 'test-key' }, { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'official-test-key' }]) {
     const text = JSON.stringify(settings);
     await writeFile(path.join(app.dataDir, 'ai-settings.json'), text);
     await app.restart('zhipu');
     const result = await app.response('/ai/explain', { questionId: 'PROVIDER-1', answer: ['B'] });
-    assert.equal(result.status, 503);
-    assert.match(result.body.error, /尚未配置/);
-    assert.equal(fetchCalls.length, 0);
+    assert.equal(result.status, 410);
+    assert.equal(result.body.modelRequested, false);
     assert.equal(await app.saved('ai-settings.json'), text);
     assert.equal(await app.saved('learning-state.json'), learning);
   }
-  await writeFile(path.join(app.dataDir, 'ai-settings.json'), JSON.stringify(complete));
-  await app.restart('zhipu');
-  assert.equal((await app.request('/ai/explain', { questionId: 'PROVIDER-1', answer: ['B'] })).text, '完整配置才可请求的测试解析');
-  assert.equal(fetchCalls.length, 1, 'the injected fetch is active for a fully configured API');
-  assert.equal(fetchCalls[0][0], 'https://example.invalid/v1/chat/completions');
-  assert.equal(JSON.parse(fetchCalls[0][1].body).model, 'custom-model');
+  assert.equal(calls, 0);
 });
 
 test('selecting a web provider preserves optional API credentials and survives restart without trusting custom web URLs', async t => {
   let calls = 0;
   const app = await harness(t, { fetchImpl: async () => { calls++; throw new Error('must not request a provider'); } });
-  await app.request('/ai/settings', { baseUrl: 'https://example.invalid/v1', model: 'saved-model', apiKey: 'mock-secret-provider-settings' }, 'PUT');
+  await app.request('/ai/settings', { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'mock-secret-provider-settings' }, 'PUT');
   const before = JSON.parse(await app.saved('ai-settings.json'));
   const selected = await app.request('/ai/settings', { webProvider: 'deepseek' }, 'PUT');
   assert.equal(selected.webProvider, 'deepseek');
@@ -519,7 +499,7 @@ test('DeepSeek personal jobs have fixed routing, global backpressure and provide
   assert.equal(busy.body.id, undefined, 'busy does not adopt a different provider task');
   assert.equal((await app.request('/bridge/jobs', payload)).id, job.id);
   assert.equal((await app.response('/bridge/jobs', { ...payload, provider: 'zhipu' })).status, 409);
-  await app.request('/ai/settings', { webProvider: 'zhipu' }, 'PUT');
+  await app.request('/ai/settings', { baseUrl: 'https://api.deepseek.com/v1', webProvider: 'zhipu' }, 'PUT');
   assert.equal((await app.request(`/bridge/jobs/${job.id}`)).provider, 'deepseek');
   await app.restart('zhipu');
   assert.equal((await app.request('/bridge/pending?provider=deepseek')).jobs[0].id, job.id);
@@ -603,13 +583,9 @@ test('saved generic explanations enter personal prompts only as independently un
   assert.match(job.prompt, /不要盲从原稿/);
 });
 
-test('invalid rendered-question revisions reject both web providers and the API before any model work', async t => {
-  let fetchCalls = 0;
-  const app = await harness(t, { fetchImpl: async () => {
-    fetchCalls++;
-    return { ok: true, json: async () => ({ choices: [{ message: { content: '不应调用的测试解析' } }] }) };
-  } });
-  await app.request('/ai/settings', { baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey: 'mock-revision-key' }, 'PUT');
+test('invalid rendered revisions reject legacy web work while generation returns a fixed retirement response', async t => {
+  let calls = 0;
+  const app = await harness(t, { fetchImpl: async () => { calls++; throw new Error('No model work'); } });
   const learning = await app.saved('learning-state.json');
   for (const expectedQuestionRevision of [-1, 0.5, '0', null, Number.MAX_SAFE_INTEGER + 1, 1]) {
     for (const provider of ['zhipu', 'deepseek']) {
@@ -619,118 +595,32 @@ test('invalid rendered-question revisions reject both web providers and the API 
       assert.equal(result.body.current.answerRevision, 0);
     }
     const result = await app.response('/ai/explain', { questionId: 'PROVIDER-1', expectedQuestionRevision });
-    assert.equal(result.status, 409);
-    assert.equal(result.body.code, 'QUESTION_UPDATED');
+    assert.equal(result.status, 410);
+    assert.equal(result.body.modelRequested, false);
   }
-  assert.equal(fetchCalls, 0);
+  assert.equal(calls, 0);
   await assert.rejects(app.saved('bridge-jobs.json'), { code: 'ENOENT' });
   assert.equal(await app.saved('learning-state.json'), learning);
 });
 
-test('a stale rendered standard cannot preempt a generic batch or call the API, while the current version can', async t => {
-  const prompts = [];
-  const app = await harness(t, { fetchImpl: async (_url, options) => {
-    prompts.push(JSON.parse(options.body).messages[1].content);
-    return { ok: true, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: '按当前修订标准生成的测试解析' } }] }) };
-  } });
-  await app.request('/ai/settings', { baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey: 'mock-revision-key' }, 'PUT');
+test('a stale legacy web request cannot preempt a batch and retired API requests cannot generate at any revision', async t => {
+  let calls = 0;
+  const app = await harness(t, { fetchImpl: async () => { calls++; throw new Error('Generation forbidden'); } });
   const batch = await dispatch(app);
   await app.request('/questions/PROVIDER-1/answer', { expectedRevision: 0, answer: ['B'], explanation: '修订后的标准依据', note: '测试纠正' }, 'PUT');
-  const journal = await app.saved('bridge-jobs.json');
-  const cache = await app.saved('preanalysis-state.json');
-  const learning = await app.saved('learning-state.json');
+  const files = ['bridge-jobs.json', 'preanalysis-state.json', 'learning-state.json'];
+  const before = await Promise.all(files.map(file => app.saved(file)));
   for (const provider of ['zhipu', 'deepseek']) {
     const rejected = await app.response('/bridge/jobs', { questionId: 'PROVIDER-1', provider, expectedQuestionRevision: 0 });
     assert.equal(rejected.status, 409);
     assert.equal(rejected.body.current.answerRevision, 1);
   }
-  assert.equal((await app.response('/ai/explain', { questionId: 'PROVIDER-1', expectedQuestionRevision: 0 })).status, 409);
-  assert.equal(prompts.length, 0);
-  assert.equal(await app.saved('bridge-jobs.json'), journal);
-  assert.equal(await app.saved('preanalysis-state.json'), cache);
-  assert.equal(await app.saved('learning-state.json'), learning);
-
+  for (const expectedQuestionRevision of [0, 1]) assert.equal((await app.response('/ai/explain', { questionId: 'PROVIDER-1', expectedQuestionRevision })).status, 410);
+  assert.deepEqual(await Promise.all(files.map(file => app.saved(file))), before);
+  assert.equal(calls, 0);
   const current = await app.request('/bridge/jobs', { questionId: 'PROVIDER-1', provider: 'deepseek', answer: ['A'], expectedQuestionRevision: 1 });
   assert.equal(current.questionRevision, 1);
-  assert.equal(current.provider, 'deepseek');
   assert.match(current.prompt, /题库标准答案：B/);
   assert.equal((await app.request(`/bridge/jobs/${batch.id}`)).failureCode, 'preempted');
-  await app.request(`/bridge/jobs/${current.id}/cancel`, {});
-  await app.request('/ai/explain', { questionId: 'PROVIDER-1', answer: ['A'], expectedQuestionRevision: 1 });
-  assert.equal(prompts.length, 1);
-  assert.match(prompts[0], /题库标准答案：B/);
 });
 
-test('explicit original revision and omitted legacy versions remain accepted for personal explanations', async t => {
-  let fetchCalls = 0;
-  const app = await harness(t, { fetchImpl: async () => {
-    fetchCalls++;
-    return { ok: true, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: `兼容旧客户端的测试解析${fetchCalls}` } }] }) };
-  } });
-  await app.request('/ai/settings', { baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey: 'mock-revision-key' }, 'PUT');
-  const original = await app.request('/bridge/jobs', { questionId: 'PROVIDER-1', expectedQuestionRevision: 0 });
-  assert.equal(original.questionRevision, 0);
-  await app.request(`/bridge/jobs/${original.id}/cancel`, {});
-  await app.request('/ai/explain', { questionId: 'PROVIDER-1', expectedQuestionRevision: 0 });
-  await app.request('/questions/PROVIDER-1/answer', { expectedRevision: 0, answer: ['B'], explanation: '兼容测试的新标准', note: '' }, 'PUT');
-  const legacy = await app.request('/bridge/jobs', { questionId: 'PROVIDER-1', provider: 'deepseek' });
-  assert.equal(legacy.questionRevision, 1);
-  await app.request(`/bridge/jobs/${legacy.id}/cancel`, {});
-  await app.request('/ai/explain', { questionId: 'PROVIDER-1' });
-  assert.equal(fetchCalls, 2);
-});
-
-test('optional API failures are controlled, never retried and never replace personal learning', async t => {
-  const secret = 'mock-private-key-errors';
-  const cases = [
-    ['network', async () => { throw new Error(secret); }, 502],
-    ['timeout', async () => { const error = new Error(secret); error.name = 'TimeoutError'; throw error; }, 502],
-    ['unauthorized', async () => ({ ok: false, status: 401, json: async () => ({ error: secret }) }), 502],
-    ['rate-limited', async () => ({ ok: false, status: 429, json: async () => ({ error: secret }) }), 502],
-    ['malformed-response', async () => null, 502],
-    ['invalid-json', async () => ({ ok: true, json: async () => { throw new Error(secret); } }), 502],
-    ['error-envelope', async () => ({ ok: true, json: async () => ({ error: { message: secret }, choices: [{ message: { content: 'must not save' } }] }) }), 502],
-    ['non-array-choices', async () => ({ ok: true, json: async () => ({ choices: { 0: { message: { content: 'must not save' } } } }) }), 502],
-    ['empty', async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: '  ' } }] }) }), 502],
-    ['non-text', async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: ['must not save'] } }] }) }), 502],
-    ...['length', 'content_filter', 'tool_calls', null].map(reason => ['unfinished-' + reason, async () => ({ ok: true, json: async () => ({ choices: [{ finish_reason: reason, message: { content: 'unfinished text' } }] }) }), 502]),
-    ['oversized', async () => ({ ok: true, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: '字'.repeat(20001) } }] }) }), 413],
-  ];
-  for (const [name, fetchResult, status] of cases) await t.test(name, async sub => {
-    let calls = 0;
-    const app = await harness(sub, { fetchImpl: async (...args) => { calls++; return fetchResult(...args); } });
-    await app.request('/ai/settings', { baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey: secret }, 'PUT');
-    const before = await app.saved('learning-state.json');
-    const result = await app.response('/ai/explain', { questionId: 'PROVIDER-1', answer: ['B'] });
-    assert.equal(result.status, status);
-    assert.equal(calls, 1);
-    assert.ok(!JSON.stringify(result.body).includes(secret));
-    assert.equal(await app.saved('learning-state.json'), before);
-    assert.equal((await app.request('/bootstrap')).progress['PROVIDER-1'].aiNote, '已经保存的个人解析');
-  });
-});
-
-test('optional API keeps its endpoint, authorization and completion boundary independent of the selected web provider', async t => {
-  let sent, calls = 0;
-  const app = await harness(t, { fetchImpl: async (url, init) => {
-    calls++; sent = { url, init };
-    return { ok: true, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: '析'.repeat(20000) } }] }) };
-  } });
-  await app.request('/ai/settings', { baseUrl: 'https://example.invalid/v1', model: 'mock-model', apiKey: 'mock-api-channel-key', webProvider: 'deepseek' }, 'PUT');
-  const before = await app.request('/bootstrap');
-  const result = await app.request('/ai/explain', { questionId: 'PROVIDER-1', answer: ['B'] });
-  assert.equal(result.text.length, 20000);
-  assert.equal(calls, 1);
-  assert.equal(sent.url, 'https://example.invalid/v1/chat/completions');
-  assert.equal(sent.init.headers.Authorization, 'Bearer mock-api-channel-key');
-  assert.equal(sent.init.redirect, 'error');
-  assert.equal(sent.init.signal.aborted, false);
-  assert.equal(JSON.parse(sent.init.body).model, 'mock-model');
-  const after = await app.request('/bootstrap');
-  assert.equal(after.ai.webProvider, 'deepseek');
-  assert.equal(after.progress['PROVIDER-1'].attempts, before.progress['PROVIDER-1'].attempts);
-  assert.deepEqual(after.progress['PROVIDER-1'].lastAnswer, before.progress['PROVIDER-1'].lastAnswer);
-  assert.deepEqual(after.sessions, before.sessions);
-  await app.restart('zhipu');
-  assert.equal((await app.request('/bootstrap')).progress['PROVIDER-1'].aiNote.length, 20000);
-});

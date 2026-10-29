@@ -91,7 +91,7 @@ describe('真实答题页面的历史标准显示', () => {
     expect(text).toContain('正确率 100%'); expect(text).toContain('✓ 回答正确');
     expect(text).toContain('当时标准答案'); expect(text).toContain('当时的原解析');
     expect(text).toContain('标准答案已更新'); expect(text).toContain('当前标准答案：B');
-    expect(text).toContain('AI 解析使用当前标准答案');
+    expect(text).toContain('网页资料按当前题目版本保存');
     const options = descendants(host).filter(node => node.tag === 'button' && String(node.props.class).split(' ').includes('option'));
     expect(options).toHaveLength(2);
     expect(String(options[0].props.class)).toContain('correct');

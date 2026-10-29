@@ -85,11 +85,11 @@ onUnmounted(() => {
 <template>
   <section class="prepared-explanation" :aria-label="ready ? '通用 AI 讲解' : '题库讲解'">
     <div class="prepared-heading"><h3>{{ ready ? '通用 AI 讲解' : '题库讲解' }}</h3><span>{{ stateText }}</span></div>
-    <p class="explanation-body">{{ standardMismatch ? '题目标准与服务器版本不一致，已暂时收起旧讲解，正在同步最新题目。' : ready ? prepared?.text : question.explanation || '这道题暂未提供题库讲解，可点击 AI 解析进一步研究。' }}</p>
+    <p class="explanation-body">{{ standardMismatch ? '题目标准与服务器版本不一致，已暂时收起旧讲解，正在同步最新题目。' : ready ? prepared?.text : question.explanation || '这道题暂未提供题库讲解，可检索并保存本题网页与文档资料。' }}</p>
     <p v-if="ready" class="prepared-source">{{ prepared?.source || '来源未记录' }}<span v-if="generatedTime"> · {{ generatedTime }}</span><span v-if="prepared?.validation?.answer === 'not-recorded'"> · 历史记录未保存答案快照</span></p>
     <details v-if="ready && question.explanation" class="original"><summary>查看题库原解析</summary><p class="explanation-body">{{ question.explanation }}</p></details>
     <p v-if="error" class="prepared-note" role="status">{{ error }}</p>
-    <p class="prepared-note">{{ standardMismatch ? '同步完成后将按最新题目显示讲解；此前已保存的学习记录和历史成绩保留。' : ready ? '这是针对题目本身的通用讲解。点击 AI 解析后，会另外比较你本次选择，当前讲解仍会保留。' : '可直接阅读题库讲解；如需进一步研究，可使用 AI 解析，并按需开启联网核对来源。' }}</p>
+    <p class="prepared-note">{{ standardMismatch ? '同步完成后将按最新题目显示讲解；此前已保存的学习记录和历史成绩保留。' : ready ? '这是此前保存的题目通用讲解；资料检索仅查找公开网页正文与文档摘录，不会重新调用生成模型。' : '可直接阅读题库讲解；也可通过 Search／Fetch 检索并保存本题网页正文与文档摘录，不调用生成模型。' }}</p>
   </section>
 </template>
 

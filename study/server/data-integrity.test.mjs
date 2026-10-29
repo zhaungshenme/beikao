@@ -74,7 +74,6 @@ async function history(app, id = q1) { return ok(await app.request(`/questions/$
 async function note(app, text, expected, id = q1) { return app.request(`/questions/${id}`, { note: text, expected: { note: expected } }, 'PATCH'); }
 async function aiNote(app, text, expected) { return app.request(`/questions/${q1}`, { aiNote: text, expected: { aiNote: expected } }, 'PATCH'); }
 async function session(app, overrides = {}) { return ok(await app.request('/sessions', { mode: 'sequential', questionIds: [q1], count: 1, ...overrides })); }
-async function configureApi(app) { ok(await app.request('/ai/settings', { baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey: 'fixture-key' }, 'PUT')); }
 
 async function blockWrite(app, filename = 'learning-state.json') {
   const target = join(app.dataDir, filename);
@@ -177,26 +176,16 @@ test('answer CAS compares normalized sets and finish checks the whole saved answ
   assert.equal((await progress(app))[q2].attempts, 1);
 });
 
-test('a delayed API result preserves an intervening manual explanation and stores the entire candidate', async t => {
-  const started = deferred();
-  const release = deferred();
-  const candidate = '迟到模型候选\n'.repeat(250);
-  const app = await harness(t, { fetchImpl: async () => { started.resolve(); await release.promise; return { ok: true, json: async () => ({ choices: [{ message: { content: candidate } }] }) }; } });
-  await configureApi(app);
-  ok(await aiNote(app, '生成前解析', ''));
-  const pending = app.request('/ai/explain', { questionId: q1, answer: ['A'] });
-  await started.promise;
-  ok(await aiNote(app, '人工修订的新解析', '生成前解析'));
-  release.resolve();
-  const blocked = conflict(await pending);
-  assert.equal(blocked.current.aiNote, '人工修订的新解析');
-  assert.ok(blocked.historyId);
+test('concurrent calls to retired generation preserve current notes and archived candidates', async t => {
+  let calls = 0;
+  const app = await harness(t, { fetchImpl: async () => { calls++; throw new Error('Model generation forbidden'); } });
+  ok(await aiNote(app, '人工修订的新解析', ''));
+  const before = await history(app);
+  const results = await Promise.all([app.request('/ai/explain', { questionId: q1 }), app.request('/ai/explain', { questionId: q1, retrievalEnabled: true })]);
+  results.forEach(result => { assert.equal(result.status, 410); assert.equal(result.body.modelRequested, false); });
   assert.equal((await progress(app))[q1].aiNote, '人工修订的新解析');
-  const savedCandidate = (await history(app)).find(entry => entry.id === blocked.historyId);
-  assert.equal(savedCandidate.text, candidate.trim());
-  assert.equal(savedCandidate.source, 'api-conflict');
-  await app.restart();
-  assert.equal((await history(app)).find(entry => entry.id === blocked.historyId).text, candidate.trim());
+  assert.deepEqual(await history(app), before);
+  assert.equal(calls, 0);
 });
 
 test('a bridge reply cannot overwrite a manual explanation saved after the bridge job started', async t => {
@@ -214,50 +203,7 @@ test('a bridge reply cannot overwrite a manual explanation saved after the bridg
   assert.equal(ok(await app.request(`/bridge/jobs/${job.id}`)).historyId, reply.historyId);
 });
 
-for (const first of ['api', 'bridge']) {
-  test(`${first} finishing first protects its explanation from the other AI channel`, async t => {
-    const started = deferred();
-    const release = deferred();
-    const app = await harness(t, { fetchImpl: async () => { started.resolve(); await release.promise; return { ok: true, json: async () => ({ choices: [{ message: { content: 'API 生成正文' } }] }) }; } });
-    await configureApi(app);
-    ok(await aiNote(app, '共同原始解析', ''));
-    const job = ok(await app.request('/bridge/jobs', { questionId: q1 }));
-    const api = app.request('/ai/explain', { questionId: q1 });
-    await started.promise;
-    if (first === 'api') {
-      release.resolve();
-      assert.equal(ok(await api).text, 'API 生成正文');
-      const late = ok(await app.request(`/bridge/jobs/${job.id}/update`, { provider: 'zhipu', status: 'completed', text: '网页生成正文' }));
-      assert.equal(late.failureCode, 'save-conflict');
-      assert.equal((await progress(app))[q1].aiNote, 'API 生成正文');
-      assert.ok((await history(app)).some(entry => entry.text === '网页生成正文'));
-    } else {
-      assert.equal(ok(await app.request(`/bridge/jobs/${job.id}/update`, { provider: 'zhipu', status: 'completed', text: '网页生成正文' })).status, 'completed');
-      release.resolve();
-      conflict(await api);
-      assert.equal((await progress(app))[q1].aiNote, '网页生成正文');
-      assert.ok((await history(app)).some(entry => entry.text === 'API 生成正文'));
-    }
-  });
-}
 
-test('two concurrent API calls retain the later-finished candidate without replacing the first saved result', async t => {
-  const started = [deferred(), deferred()];
-  const release = [deferred(), deferred()];
-  let calls = 0;
-  const app = await harness(t, { fetchImpl: async () => { const index = calls++; started[index].resolve(); await release[index].promise; return { ok: true, json: async () => ({ choices: [{ message: { content: `调用 ${index} 的结果` } }] }) }; } });
-  await configureApi(app);
-  const oldCall = app.request('/ai/explain', { questionId: q1 });
-  await started[0].promise;
-  const newCall = app.request('/ai/explain', { questionId: q1 });
-  await started[1].promise;
-  release[1].resolve();
-  assert.equal(ok(await newCall).text, '调用 1 的结果');
-  release[0].resolve();
-  conflict(await oldCall);
-  assert.equal((await progress(app))[q1].aiNote, '调用 1 的结果');
-  assert.ok((await history(app)).some(entry => entry.text === '调用 0 的结果'));
-});
 
 test('bridge completion retries its own applied write after a journal failure without duplicating history', async t => {
   const app = await harness(t);
@@ -445,12 +391,11 @@ test('an imported exam requires a string deadline and native export timestamps r
   assert.equal(restored.cursor, 0);
 });
 
-test('an oversized API explanation is rejected without truncating or replacing the saved explanation', async t => {
-  const app = await harness(t, { fetchImpl: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: '字'.repeat(20001) } }] }) }) });
-  await configureApi(app);
+test('oversized manual explanations are rejected without truncating saved history', async t => {
+  const app = await harness(t);
   ok(await aiNote(app, '已有完整解析', ''));
   const before = await history(app);
-  assert.equal((await app.request('/ai/explain', { questionId: q1 })).status, 413);
+  assert.equal((await aiNote(app, '字'.repeat(20001), '已有完整解析')).status, 413);
   assert.equal((await progress(app))[q1].aiNote, '已有完整解析');
   assert.deepEqual(await history(app), before);
 });
