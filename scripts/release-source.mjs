@@ -3,10 +3,13 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { deflateRawSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { validateQuestionBankImport } from '../study/server/question-bank-import.mjs';
+import { validatePreparedSeed } from '../study/server/prepared-seed.mjs';
+import { questionFingerprint } from '../study/server/preanalysis.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-// Reviewed files only. Never walk a working directory or copy Git history, banks,
-// screenshots, model transcripts, local settings or a user's storage directory.
+// Reviewed files only. Only the two explicitly published teaching data files
+// below are admitted; never copy other banks, transcripts or private storage.
 export const SOURCE_FILES = [
   '.gitignore', 'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'SECURITY.md',
   'package.json', 'package-lock.json', 'tsconfig.json',
@@ -14,11 +17,12 @@ export const SOURCE_FILES = [
   '.github/workflows/verify.yml',
   'scripts/release-source.mjs', 'scripts/release-source.test.mjs',
   'study/README.md', 'study/data/README.md',
+  'study/data/questions.json', 'study/data/prepared-explanations.json',
   'study/build.mjs', 'study/serve.mjs', 'study/runtime-config.mjs',
   'study/service-process.ps1', 'study/desktop-launcher.ps1', 'study/verify.mjs',
   'study/import-bank.mjs', 'study/index.html', 'study/main.ts', 'study/tsconfig.json',
   ...[
-    'api.mjs', 'preanalysis.mjs', 'official-api.mjs', 'deepseek-retrieval.mjs', 'retrieval-archive.mjs', 'retrieval-recovery.mjs',
+    'api.mjs', 'preanalysis.mjs', 'prepared-seed.mjs', 'prepared-seed.test.mjs', 'official-api.mjs', 'deepseek-retrieval.mjs', 'retrieval-archive.mjs', 'retrieval-recovery.mjs',
     'bridge-script.mjs', 'storage-lock.mjs', 'question-bank-import.mjs',
     'api.test.mjs', 'ai-correct-answer.test.mjs', 'ai-history.test.mjs', 'ai-retrieval.test.mjs',
     'answer-corrections.test.mjs', 'browser-ui-protocol.test.mjs',
@@ -62,7 +66,9 @@ function readSource(root, relative) {
   const data = fs.readFileSync(current);
   const text = data.toString('utf8');
   // Report only a path. Never print a matched credential or source line.
-  if (/(?:sk-[a-zA-Z0-9_-]{20,}|gh[pousr]_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/.test(text)) {
+  // A token may follow punctuation (including URL / or =), but not be the
+  // suffix of an ordinary word such as "risk-management-framework".
+  if (/(?:(?<![a-zA-Z0-9_-])sk-[a-zA-Z0-9_-]{20,}|gh[pousr]_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/.test(text)) {
     throw new Error(`疑似真实密钥，发布已阻止：${relative}`);
   }
   if (/[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+[\\/]/i.test(text)) throw new Error(`发现本机用户绝对路径，发布已阻止：${relative}`);
@@ -91,6 +97,21 @@ function publicPackage(original) {
 
 export function collectReleaseFiles(root = projectRoot) {
   const files = new Map(SOURCE_FILES.map(relative => [relative, readSource(root, relative)]));
+  const questions = validateQuestionBankImport(JSON.parse(files.get('study/data/questions.json').toString('utf8').replace(/^\uFEFF/, '')));
+  const allowedFields = new Set(['id', 'category', 'chapter', 'type', 'difficulty', 'stem', 'options', 'answer', 'explanation', 'knowledgePoint', 'source', 'referenceUrls']);
+  for (const question of questions) {
+    if (Object.keys(question).some(key => !allowedFields.has(key)) || question.options.some(option => Object.keys(option).some(key => !['id', 'text'].includes(key)))) {
+      throw new Error('公开题库含未允许字段，发布已阻止。');
+    }
+  }
+  const seed = validatePreparedSeed(JSON.parse(files.get('study/data/prepared-explanations.json').toString('utf8').replace(/^\uFEFF/, '')));
+  if (!questions.length || Object.keys(seed).length !== questions.length) throw new Error('公开题库与讲解必须逐题完整对应。');
+  for (const question of questions) {
+    const entry = seed[question.id];
+    if (!entry || entry.fingerprint !== questionFingerprint(question) || JSON.stringify([...entry.answer].sort()) !== JSON.stringify([...question.answer].sort())) {
+      throw new Error('公开讲解与题目或标准不匹配，发布已阻止。');
+    }
+  }
   const pkg = JSON.parse(files.get('package.json'));
   const lock = JSON.parse(files.get('package-lock.json'));
   const lockRoot = lock.packages?.[''];
@@ -104,7 +125,7 @@ export function collectReleaseFiles(root = projectRoot) {
     if (!entry.resolved.startsWith('https://registry.npmjs.org/') || !entry.integrity) throw new Error(`锁文件包含未核验的依赖来源：${name}`);
   }
   const manifest = {
-    format: 1, project: '备考', includesQuestionBank: false, includesPrivateData: false,
+    format: 1, project: '备考', includesQuestionBank: true, includesPreparedExplanations: true, questionCount: questions.length, includesPrivateData: false,
     files: [...files].map(([name, data]) => ({ path: name, bytes: data.length, sha256: sha256(data) })),
   };
   files.set('RELEASE-MANIFEST.json', Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`));
@@ -178,7 +199,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (args.length > 1) throw new Error('用法：node scripts/release-source.mjs [--check | artifacts/新目录名]');
     if (args[0] === '--check') {
       const files = collectReleaseFiles();
-      console.log(`无题库源码检查通过：${files.size} 个文件；未读取私人数据或题库。`);
+      const manifest = JSON.parse(files.get('RELEASE-MANIFEST.json'));
+      console.log(`公开源码与 ${manifest.questionCount} 题讲解检查通过：${files.size} 个文件；未读取私人学习数据。`);
     } else {
       if (args[0]?.startsWith('-')) throw new Error('未知发布参数。');
       const destination = path.resolve(projectRoot, args[0] || `artifacts/beikao-source-${new Date().toISOString().replace(/[-:.]/g, '')}`);

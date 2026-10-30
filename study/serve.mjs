@@ -20,7 +20,7 @@ const indexFile = path.join(dist, 'study/index.html');
 if (!fs.existsSync(indexFile)) throw new Error('页面尚未构建，请先运行 npm run build:study。');
 const releaseStorage = acquireStorageLock(dataDir);
 let api;
-try { api = createStudyApi({ dataDir, questionsPath: path.join(studyDir, 'data/questions.json'), activeProvider: 'zhipu' }); }
+try { api = createStudyApi({ dataDir, questionsPath: path.join(studyDir, 'data/questions.json'), preparedExplanationsPath: path.join(studyDir, 'data/prepared-explanations.json'), activeProvider: 'zhipu' }); }
 catch (error) { releaseStorage(); throw error; }
 process.on('exit', releaseStorage);
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.ico': 'image/x-icon' };
@@ -38,7 +38,7 @@ const server = createServer((req, res) => {
   let file;
   if (pathname === '/bridge/Study-Bridge.user.js' || pathname === '/bridge/' || pathname === '/bridge') {
     res.writeHead(410, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
-    res.end(req.method === 'HEAD' ? undefined : '网页版解析链路已停用。请打开 /study/，在学习设置中配置模型 API；历史讲解保留。');
+    res.end(req.method === 'HEAD' ? undefined : '网页版解析链路已停用。请打开 /study/ 阅读已保存讲解；需要网页资料时可在学习设置中配置 DeepSeek Search／Fetch。');
     return;
   }
   else {

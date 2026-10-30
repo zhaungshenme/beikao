@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { readPreparedSeed } from './prepared-seed.mjs';
 
 export const PREANALYSIS_PROMPT_VERSION = 1;
 export const PREANALYSIS_REPLY_V1 = 'preanalysis-fingerprint-v1';
@@ -17,9 +18,10 @@ const providerSource = (provider, transport, model) => provider === 'zhipu'
   : provider === 'deepseek' ? 'DeepSeek 网页预解析' : '未知来源通用讲解';
 
 /** Independent, durable cache: no access to user progress, notes or historical grades. */
-export function createPreanalysisStore({ dataDir, getQuestions, atomicJson, now = Date.now, provider = 'zhipu' }) {
+export function createPreanalysisStore({ dataDir, getQuestions, atomicJson, now = Date.now, provider = 'zhipu', preparedExplanationsPath }) {
   assert(provider === 'zhipu', '当前通用讲解仅支持智谱。');
   const file = path.join(dataDir, 'preanalysis-state.json');
+  const seedCache = readPreparedSeed(preparedExplanationsPath);
   const time = () => new Date(now()).toISOString();
   let state = { version: 1, status: 'idle', batchSize: 3, currentJobId: null, message: '尚未开始生成通用讲解。', updatedAt: time(), cache: {}, failures: {}, quarantine: [] };
   if (fs.existsSync(file)) {
@@ -42,14 +44,17 @@ export function createPreanalysisStore({ dataDir, getQuestions, atomicJson, now 
   // A content fingerprint binds the question version. When an answer snapshot is
   // present, validate it as well; a corrupted snapshot must not be shown as ready.
   // Older records without that field remain readable, explicitly labelled below.
-  const ready = question => {
-    const entry = state.cache[question.id];
+  const matches = (question, entry) => {
     if (entry?.fingerprint !== questionFingerprint(question)) return false;
     if (entry.answer === undefined) return true;
     return Array.isArray(entry.answer) && entry.answer.every(value => typeof value === 'string') &&
       new Set(entry.answer).size === entry.answer.length &&
       JSON.stringify([...entry.answer].sort()) === JSON.stringify([...question.answer].sort());
   };
+  // Personal revisions take precedence. Shipped content is read-only and must
+  // match the exact current question and grading standard before it is visible.
+  const entryFor = question => matches(question, state.cache[question.id]) ? state.cache[question.id] : seedCache[question.id] ?? state.cache[question.id];
+  const ready = question => matches(question, entryFor(question));
   const failed = question => state.failures[question.id]?.fingerprint === questionFingerprint(question);
   function status() {
     const all = questions();
@@ -71,7 +76,7 @@ export function createPreanalysisStore({ dataDir, getQuestions, atomicJson, now 
     const contentVersion = JSON.stringify([current.id, current.type, current.stem, current.options.map(option => [option.id, option.text]),
       [...current.answer].sort(), current.explanation, questionRevision]);
     const identity = { questionId: id, questionRevision, contentVersion, fingerprint };
-    const entry = state.cache[id];
+    const entry = entryFor(current);
     if (ready(current)) return { ...identity, state: 'ready', text: entry.text,
       source: typeof entry.source === 'string' && entry.source.trim() ? entry.source : '来源未记录的历史通用讲解', generatedAt: entry.generatedAt,
       validation: { identity: 'matched', answer: entry.answer === undefined ? 'not-recorded' : 'matched', factualReview: 'not-recorded' } };

@@ -80,3 +80,7 @@ artifacts/
 # Rebuild the store upload package from browser-extension sources.
 browser-extension/dist/
 browser-extension/artifacts/
+
+# Explicitly published teaching content only; all other local banks stay ignored.
+!study/data/questions.json
+!study/data/prepared-explanations.json

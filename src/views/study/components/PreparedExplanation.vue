@@ -21,6 +21,12 @@ const generatedTime = computed(() => {
   const time = prepared.value?.generatedAt;
   return time && Number.isFinite(Date.parse(time)) ? new Date(time).toLocaleString('zh-CN', { hour12: false }) : '';
 });
+// Keep the saved teaching text intact; give each reviewed option its own line.
+const displayedExplanation = computed(() => {
+  if (standardMismatch.value) return '题目标准与服务器版本不一致，已暂时收起旧讲解，正在同步最新题目。';
+  if (!ready.value) return props.question.explanation || '这道题暂未提供题库讲解，可检索并保存本题网页与文档资料。';
+  return prepared.value!.text.replace(/([^\nA-Z0-9])([A-Z][A-Z0-9]*（(?:应选|不选)）：)/gu, '$1\n$2');
+});
 // Content changes, not just IDs, must discard a previous question/version response.
 const version = computed(() => JSON.stringify([props.question.id, props.question.type, props.question.stem,
   props.question.options.map(option => [option.id, option.text]), [...props.question.answer].sort(), props.question.explanation,
@@ -85,7 +91,7 @@ onUnmounted(() => {
 <template>
   <section class="prepared-explanation" :aria-label="ready ? '通用 AI 讲解' : '题库讲解'">
     <div class="prepared-heading"><h3>{{ ready ? '通用 AI 讲解' : '题库讲解' }}</h3><span>{{ stateText }}</span></div>
-    <p class="explanation-body">{{ standardMismatch ? '题目标准与服务器版本不一致，已暂时收起旧讲解，正在同步最新题目。' : ready ? prepared?.text : question.explanation || '这道题暂未提供题库讲解，可检索并保存本题网页与文档资料。' }}</p>
+    <p class="explanation-body">{{ displayedExplanation }}</p>
     <p v-if="ready" class="prepared-source">{{ prepared?.source || '来源未记录' }}<span v-if="generatedTime"> · {{ generatedTime }}</span><span v-if="prepared?.validation?.answer === 'not-recorded'"> · 历史记录未保存答案快照</span></p>
     <details v-if="ready && question.explanation" class="original"><summary>查看题库原解析</summary><p class="explanation-body">{{ question.explanation }}</p></details>
     <p v-if="error" class="prepared-note" role="status">{{ error }}</p>

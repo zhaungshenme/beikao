@@ -1,7 +1,9 @@
 {
   "format": 1,
   "project": "备考",
-  "includesQuestionBank": false,
+  "includesQuestionBank": true,
+  "includesPreparedExplanations": true,
+  "questionCount": 2000,
   "includesPrivateData": false,
   "files": [
     {
@@ -11,8 +13,8 @@
     },
     {
       "path": ".gitignore",
-      "bytes": 1608,
-      "sha256": "f5f58a7ea5561497cd8e9c485fb625134fa26d9c9c1720a95e07c2e0ef43ffd0"
+      "bytes": 1761,
+      "sha256": "643c1287015e8fded1d3c1effd38f02436bf57fa3d7a4840d0f7c4c65a9044c6"
     },
     {
       "path": "LICENSE",
@@ -21,13 +23,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 3962,
-      "sha256": "cca9adb01dad9c807d4c5c29faeb2a38363491cc2f858e88640ff5adec1d588e"
+      "bytes": 4445,
+      "sha256": "e7602d0c5d51a65b91af05bede5930d826f9b7966a0e5feb643ee6d5057f95f5"
     },
     {
       "path": "SECURITY.md",
-      "bytes": 1315,
-      "sha256": "b8310333a1a3c442913dfe9721a198669253f07b54df89840925873193f1d69e"
+      "bytes": 1473,
+      "sha256": "fde9018d34e738940ce2e207b24688503c5a23060c1600eb15e4ce1d88e2c042"
     },
     {
       "path": "Start-Study.ps1",
@@ -56,13 +58,13 @@
     },
     {
       "path": "scripts/release-source.mjs",
-      "bytes": 10572,
-      "sha256": "9c2193648857f27ade19af11c6414b176a26ecf821595d6b2709361f51e5c785"
+      "bytes": 12481,
+      "sha256": "508693d81fd020deeec34dfd9682d9a66ff3ed642ea54be812a6471d5332e581"
     },
     {
       "path": "scripts/release-source.test.mjs",
-      "bytes": 5076,
-      "sha256": "21a859f1aab2716ad53ea629de0adf832f0e36bef2341f51cf2cce77cda30b7f"
+      "bytes": 8554,
+      "sha256": "2a9f5517d1c234e1e6837373cbe8984162c6195547c264f8a7bb1758af610b5e"
     },
     {
       "path": "src/api/study/index.ts",
@@ -111,13 +113,13 @@
     },
     {
       "path": "src/views/study/components/PreparedExplanation.vue",
-      "bytes": 6962,
-      "sha256": "33deca6cce3e7a91fa726a0e31d2d0d9f6ee162248466ba836caea7183b20bc3"
+      "bytes": 7255,
+      "sha256": "a7606a39adec79c4d29022753c209768f889e2c88a733a1a68be7c9f6db4e89b"
     },
     {
       "path": "study/README.md",
-      "bytes": 12450,
-      "sha256": "fbe0abc2a3150aa5333463bbe29b0a13d4a236cc1a8d493c69edcdac0f6e93ab"
+      "bytes": 13116,
+      "sha256": "3aff17189487c55d0e7680b6406a032578fa2f11caba4bdd18c5003a3c79e527"
     },
     {
       "path": "study/build.mjs",
@@ -216,8 +218,18 @@
     },
     {
       "path": "study/data/README.md",
-      "bytes": 608,
-      "sha256": "d4e4ec144e14d0c90c6b7d58c67b9b6c469277b9122580125368ca977f067d61"
+      "bytes": 952,
+      "sha256": "89cecd4ba68683a890aeea1c2646559065aff6c80ee712a63b2b74c66613872d"
+    },
+    {
+      "path": "study/data/prepared-explanations.json",
+      "bytes": 2095996,
+      "sha256": "d1e40712a3d3178cc0f73f89fe32851332029c6baa6375633c82b14d5be6128e"
+    },
+    {
+      "path": "study/data/questions.json",
+      "bytes": 2702884,
+      "sha256": "630d6796d621f5dfaf45d1b5ee0c87dd1a5267de938f21da08b323b2ebd4a867"
     },
     {
       "path": "study/desktop-launcher.ps1",
@@ -246,8 +258,8 @@
     },
     {
       "path": "study/serve.mjs",
-      "bytes": 4683,
-      "sha256": "c930c1a458d806a7419ca4828f764aad96188e5a7efdb88fe9b1870b1dfa18a0"
+      "bytes": 4804,
+      "sha256": "5ab2cf4515187cddd53fbb9e072e1321898c8819529b961b24ba231b82eaf190"
     },
     {
       "path": "study/server/ai-correct-answer.test.mjs",
@@ -271,8 +283,8 @@
     },
     {
       "path": "study/server/api.mjs",
-      "bytes": 115267,
-      "sha256": "135317fc507d3fc8efe3d14d6d6ee9b50345322e24f92e7c0204ab974fd0d22a"
+      "bytes": 115319,
+      "sha256": "d227fe76de5a9c4c014fe871805be63f7208a2249ebcee87ee70748bae7da766"
     },
     {
       "path": "study/server/api.test.mjs",
@@ -341,13 +353,23 @@
     },
     {
       "path": "study/server/preanalysis.mjs",
-      "bytes": 18918,
-      "sha256": "e1b1fb0613dc81f466e1d992de618ea693d2f832a0b83cc5e34bad6c4c2c286f"
+      "bytes": 19416,
+      "sha256": "c5d458231e968d3904512524ecf21f08d5343c615002b47900339d1f9bff9679"
     },
     {
       "path": "study/server/preanalysis.test.mjs",
       "bytes": 22431,
       "sha256": "f3d6065b88053d8c69229bb59a9dfcc8e19035206d919e88346a7e5cbff78f84"
+    },
+    {
+      "path": "study/server/prepared-seed.mjs",
+      "bytes": 2508,
+      "sha256": "7ac6baca20d1a6d610bd3152524d818248ed59cebecaf5fbd1fa0a92ce2bccf1"
+    },
+    {
+      "path": "study/server/prepared-seed.test.mjs",
+      "bytes": 6088,
+      "sha256": "5bb7b784ce3abe6a50b6e7149ca7fdd8e9f49d1e9a3577ec1e116fb02d1e61a2"
     },
     {
       "path": "study/server/question-bank-import.mjs",
@@ -411,8 +433,8 @@
     },
     {
       "path": "study/verify.mjs",
-      "bytes": 1523,
-      "sha256": "e66b350b595ff9b3cbf9c38eadcbee1e046e10bb5a808de7f875348844842746"
+      "bytes": 1535,
+      "sha256": "44842bb0df5fa2f1f88cb1d2de8bedbd8171c2a2c13b2abf0b7f0a9e7bc126d1"
     },
     {
       "path": "tsconfig.json",

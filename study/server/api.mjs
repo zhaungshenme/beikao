@@ -279,7 +279,7 @@ function recordMetadata(value, label) {
 
 // The legacy switch exists only for isolated compatibility regression tests.
 // Normal startup does not expose web-chat dispatch or accept new personal jobs.
-export function createStudyApi({ dataDir, questionsPath, fetchImpl = globalThis.fetch, now = () => Date.now(), activeProvider = 'zhipu', officialSettingsOptions = {}, allowLegacyWebBridge = false }) {
+export function createStudyApi({ dataDir, questionsPath, preparedExplanationsPath, fetchImpl = globalThis.fetch, now = () => Date.now(), activeProvider = 'zhipu', officialSettingsOptions = {}, allowLegacyWebBridge = false }) {
   const providedFetch = fetchImpl;
   // All production and legacy paths share this outbound boundary. There is no
   // model-generation escape hatch, even when compatibility fixtures are enabled.
@@ -508,7 +508,7 @@ export function createStudyApi({ dataDir, questionsPath, fetchImpl = globalThis.
   const retrievalArchive = createRetrievalArchive({ dataDir, getQuestion: questionFor,
     getQuestions: () => questions.map(question => questionFor(question.id)),
     getSettings: () => ({ baseUrl: ai.baseUrl, key: personalApiKey() }), atomicJson, fetchImpl, now });
-  const preanalysis = createPreanalysisStore({ dataDir, getQuestions: () => questions.map(question => questionFor(question.id)), atomicJson, now, provider: activeProvider });
+  const preanalysis = createPreanalysisStore({ dataDir, getQuestions: () => questions.map(question => questionFor(question.id)), atomicJson, now, provider: activeProvider, preparedExplanationsPath });
   preanalysis.reconcile([...bridgeJobs.values()].find(job => job.kind === 'preanalysis' && !terminalJob(job)));
   // A browser might still hold the previous assignment after a service restart.
   // Require an explicit resume instead of replaying that conversation automatically.

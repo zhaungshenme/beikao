@@ -11,7 +11,7 @@ const serverTests = fs.readdirSync(path.join(root, 'study/server'))
   .filter(file => file.endsWith('.test.mjs') && !['bank-expansion.test.mjs', 'userscript-resilience.test.mjs'].includes(file))
   .map(file => `study/server/${file}`);
 const checks = [
-  ['无题库发布范围检查', ['scripts/release-source.mjs', '--check']],
+  ['公开题目与讲解发布范围检查', ['scripts/release-source.mjs', '--check']],
   ['后端回归（合成临时数据）', ['--test', ...serverTests]],
   ['源码发布隔离回归', ['--test', 'scripts/release-source.test.mjs']],
   ['前端任务恢复回归', ['node_modules/vitest/vitest.mjs', 'run', '--config', 'study/client-tests/vitest.config.ts']],
